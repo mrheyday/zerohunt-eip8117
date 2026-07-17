@@ -196,6 +196,100 @@ impl MetalContext {
             .collect()
     }
 
+    /// Derive `(privkey, address)` on the GPU for each `(seed, counter)` pair
+    /// via `kernels/miner.metal` (concatenated after keccak/field/ec, mirroring
+    /// `run_scalarmul`'s source assembly): `privkey = keccak256(seed‖counter_le8)`
+    /// (scalar-range-guarded), `address = keccak256(x_be‖y_be)[12..32]` of the
+    /// resulting `privkey*G` point. A guard miss (privkey == 0 or >= the
+    /// secp256k1 order) yields an all-zero address for that entry.
+    pub fn derive_address_gpu(
+        &self,
+        seeds: &[[u8; 32]],
+        counters: &[u64],
+    ) -> Vec<([u8; 32], [u8; 20])> {
+        assert_eq!(seeds.len(), counters.len(), "seeds/counters length mismatch");
+        let n = seeds.len();
+
+        let mut seed_bytes = vec![0u8; n * 32];
+        for (i, s) in seeds.iter().enumerate() {
+            seed_bytes[i * 32..i * 32 + 32].copy_from_slice(s);
+        }
+
+        let keccak_src = include_str!("../../kernels/keccak.metal");
+        let field_src = include_str!("../../kernels/field.metal");
+        let ec_src = include_str!("../../kernels/ec.metal");
+        let miner_src = include_str!("../../kernels/miner.metal");
+        let src = format!("{keccak_src}\n{field_src}\n{ec_src}\n{miner_src}");
+
+        let lib = self
+            .device
+            .new_library_with_source(&src, &CompileOptions::new())
+            .expect("kernel compile failed");
+        let func = lib.get_function("derive_test", None).expect("entry not found");
+        let pipeline = self
+            .device
+            .new_compute_pipeline_state_with_function(&func)
+            .expect("pipeline");
+
+        let seeds_buf = self.device.new_buffer_with_data(
+            seed_bytes.as_ptr() as *const std::ffi::c_void,
+            seed_bytes.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let counters_buf = self.device.new_buffer_with_data(
+            counters.as_ptr() as *const std::ffi::c_void,
+            (counters.len() * std::mem::size_of::<u64>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let out_priv_buf = self
+            .device
+            .new_buffer((n * 32) as u64, MTLResourceOptions::StorageModeShared);
+        let out_addr_buf = self
+            .device
+            .new_buffer((n * 20) as u64, MTLResourceOptions::StorageModeShared);
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&pipeline);
+        enc.set_buffer(0, Some(&seeds_buf), 0);
+        enc.set_buffer(1, Some(&counters_buf), 0);
+        enc.set_buffer(2, Some(&out_priv_buf), 0);
+        enc.set_buffer(3, Some(&out_addr_buf), 0);
+        enc.dispatch_thread_groups(MTLSize::new(n as u64, 1, 1), MTLSize::new(1, 1, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let priv_ptr = out_priv_buf.contents() as *const u8;
+        let priv_bytes = unsafe { std::slice::from_raw_parts(priv_ptr, n * 32) };
+        let addr_ptr = out_addr_buf.contents() as *const u8;
+        let addr_bytes = unsafe { std::slice::from_raw_parts(addr_ptr, n * 20) };
+
+        (0..n)
+            .map(|i| {
+                let mut pk = [0u8; 32];
+                pk.copy_from_slice(&priv_bytes[i * 32..i * 32 + 32]);
+                let mut addr = [0u8; 20];
+                addr.copy_from_slice(&addr_bytes[i * 20..i * 20 + 20]);
+                (pk, addr)
+            })
+            .collect()
+    }
+
+    /// Host-side re-derivation gate: recompute the Ethereum address from
+    /// `privkey` via `k256`/`ethers::utils::secret_key_to_address` and check
+    /// it matches `address`. Returns `false` (not a panic) for a
+    /// non-canonical `privkey` (e.g. zero or >= the secp256k1 order), so
+    /// scalar-range-guard misses cleanly fail the check.
+    pub fn verify_hit(&self, privkey: [u8; 32], address: [u8; 20]) -> bool {
+        use ethers::core::k256::ecdsa::SigningKey;
+        use ethers::utils::secret_key_to_address;
+        match SigningKey::from_bytes((&privkey).into()) {
+            Ok(sk) => secret_key_to_address(&sk).as_bytes() == address,
+            Err(_) => false,
+        }
+    }
+
     /// Compile `src`, bind `inputs`/`lens`/an output buffer, dispatch the
     /// `keccak_test` kernel over `n` threads (one per input), and return the
     /// resulting 32-byte digests.

@@ -198,3 +198,32 @@ fn scalarmul_matches_k256_pubkey() {
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
+
+// ---------------------------------------------------------------------------
+// Full derive(seed,counter) -> (privkey,address) pipeline: keccak + field +
+// ec + miner kernels concatenated, cross-checked against host k256.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pipeline_privkey_and_address_match_host() {
+    use ethers::core::k256::ecdsa::SigningKey;
+    use ethers::utils::secret_key_to_address;
+    let ctx = MetalContext::new();
+    let seeds: Vec<[u8; 32]> = (0..8)
+        .map(|i| {
+            let mut s = [0u8; 32];
+            s[0] = i as u8;
+            s[31] = 0xA5;
+            s
+        })
+        .collect();
+    let counters: Vec<u64> = (0..8).collect();
+    let out = ctx.derive_address_gpu(&seeds, &counters);
+    for (i, (priv_k, addr)) in out.iter().enumerate() {
+        // host: privkey = keccak(seed‖counter_le); guard skips 0/>=n (won't hit here)
+        let sk = SigningKey::from_bytes(priv_k.into()).expect("canonical key");
+        let want = secret_key_to_address(&sk);
+        assert_eq!(&addr[..], want.as_bytes(), "address mismatch idx {i}");
+        assert!(ctx.verify_hit(*priv_k, *addr), "verify_hit false for idx {i}");
+    }
+}
