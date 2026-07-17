@@ -127,6 +127,75 @@ impl MetalContext {
         limbs_to_u256(&out)
     }
 
+    /// Compute the affine secp256k1 public key `k*G` for each 32-byte
+    /// big-endian private key on the GPU via `kernels/ec.metal` (concatenated
+    /// after `kernels/field.metal`, mirroring `run_field`'s source assembly).
+    /// Returns one 64-byte `x‖y` per key, each coordinate 32 big-endian bytes,
+    /// matching k256's uncompressed encoding (`0x04 ‖ x ‖ y`) minus the prefix.
+    pub fn run_scalarmul(&self, keys: &[[u8; 32]]) -> Vec<[u8; 64]> {
+        let n = keys.len();
+        // Marshal each big-endian key into 8 little-endian u32 limbs.
+        let mut in_limbs = vec![0u32; n * 8];
+        for (i, k) in keys.iter().enumerate() {
+            for limb in 0..8 {
+                let hi = 28 - limb * 4; // limb 0 = least-significant word
+                in_limbs[i * 8 + limb] =
+                    u32::from_be_bytes([k[hi], k[hi + 1], k[hi + 2], k[hi + 3]]);
+            }
+        }
+
+        let field_src = include_str!("../../kernels/field.metal");
+        let ec_src = include_str!("../../kernels/ec.metal");
+        let src = format!("{field_src}\n{ec_src}");
+
+        let lib = self
+            .device
+            .new_library_with_source(&src, &CompileOptions::new())
+            .expect("kernel compile failed");
+        let func = lib.get_function("ec_test", None).expect("entry not found");
+        let pipeline = self
+            .device
+            .new_compute_pipeline_state_with_function(&func)
+            .expect("pipeline");
+
+        let in_buf = self.device.new_buffer_with_data(
+            in_limbs.as_ptr() as *const std::ffi::c_void,
+            (in_limbs.len() * std::mem::size_of::<u32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let out_len = n * 16; // 8 x-limbs + 8 y-limbs per key
+        let out_buf = self.device.new_buffer(
+            (out_len * std::mem::size_of::<u32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&pipeline);
+        enc.set_buffer(0, Some(&in_buf), 0);
+        enc.set_buffer(1, Some(&out_buf), 0);
+        enc.dispatch_thread_groups(MTLSize::new(n as u64, 1, 1), MTLSize::new(1, 1, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let ptr = out_buf.contents() as *const u32;
+        let limbs = unsafe { std::slice::from_raw_parts(ptr, out_len) };
+        (0..n)
+            .map(|i| {
+                let mut out = [0u8; 64];
+                // x limbs -> bytes [0..32] BE, y limbs -> bytes [32..64] BE.
+                for limb in 0..8 {
+                    let pos = 28 - limb * 4;
+                    out[pos..pos + 4].copy_from_slice(&limbs[i * 16 + limb].to_be_bytes());
+                    out[32 + pos..32 + pos + 4]
+                        .copy_from_slice(&limbs[i * 16 + 8 + limb].to_be_bytes());
+                }
+                out
+            })
+            .collect()
+    }
+
     /// Compile `src`, bind `inputs`/`lens`/an output buffer, dispatch the
     /// `keccak_test` kernel over `n` threads (one per input), and return the
     /// resulting 32-byte digests.

@@ -152,3 +152,49 @@ fn field_ops_match_host_mod_p() {
         assert_eq!(ctx.run_field(a, a, 3), inv, "inv {ah}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// secp256k1 EC scalar-mult (k*G -> affine pubkey) GPU vs k256 cross-check.
+// ---------------------------------------------------------------------------
+
+/// Parse a 64-char hex string into a 32-byte big-endian array.
+fn hex_to_32(h: &str) -> [u8; 32] {
+    let bytes = (0..h.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap())
+        .collect::<Vec<u8>>();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    out
+}
+
+#[test]
+fn scalarmul_matches_k256_pubkey() {
+    use ethers::core::k256::ecdsa::SigningKey;
+    let ctx = MetalContext::new();
+    // deterministic keys incl. edges: 1, 2, and a fixed 32-byte value
+    let mut keys: Vec<[u8; 32]> = vec![[0u8; 32], [0u8; 32], [0u8; 32]];
+    keys[0][31] = 1;
+    keys[1][31] = 2;
+    keys[2] = hex_to_32("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    let gpu = ctx.run_scalarmul(&keys);
+    for (i, k) in keys.iter().enumerate() {
+        let sk = SigningKey::from_bytes(k.into()).unwrap();
+        let pt = sk.verifying_key().to_encoded_point(false); // 0x04 ‖ x(32) ‖ y(32)
+        let want = &pt.as_bytes()[1..65];
+        assert_eq!(
+            &gpu[i][..],
+            want,
+            "pubkey mismatch key {i}\n gpu x={} y={}\nwant x={} y={}",
+            hex(&gpu[i][..32]),
+            hex(&gpu[i][32..]),
+            hex(&want[..32]),
+            hex(&want[32..]),
+        );
+    }
+}
+
+/// Lowercase hex of a byte slice (test diagnostics only).
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
