@@ -3,6 +3,18 @@ name = "zerohunt"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "zerohunt"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zerohunt"
+path = "src/main.rs"
+
+[[bin]]
+name = "zerohunt-gpu"
+path = "src/bin/gpu.rs"
+
 [dependencies]
 # Pinned to 0.8 to match k256 0.13 (via ethers 2.0.14), which bounds
 # `SigningKey::random` on rand_core 0.6 traits. rand 0.9/0.10 use rand_core
