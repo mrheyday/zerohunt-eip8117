@@ -1,7 +1,8 @@
 use std::env;
 use ethers::signers::{Signer, Wallet};
 use ethers::utils::{hex, secret_key_to_address};
-use rand::rngs::OsRng;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -10,9 +11,26 @@ use tokio::task;
 use std::time::{Duration, Instant};
 use ethers::core::k256::ecdsa::SigningKey;
 
+/// Iterations each worker accumulates before flushing to the shared
+/// generated-counter atomic (reduces cross-thread cache-line contention).
+const COUNTER_FLUSH: usize = 4096;
+
 #[tokio::main]
 async fn main() {
-    let max_zeros: usize = env::args().nth(1).unwrap_or("8".to_string()).parse().expect("Invalid number");
+    // First CLI arg is the target leading-zero count; defaults to 8 when omitted.
+    // On a non-numeric arg, exit cleanly with usage instead of panicking.
+    let max_zeros: usize = match env::args().nth(1) {
+        None => 8,
+        Some(arg) => match arg.trim().parse() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!(
+                    "Invalid leading-zero count: {arg:?}\nUsage: zerohunt [max_zeros]   (positive integer, default 8)"
+                );
+                std::process::exit(2);
+            }
+        },
+    };
     let num_threads = num_cpus::get();
     println!("Number of threads: {}\nfinding first wallet with {} leading zeros", num_threads, max_zeros);
     let max_zero_count = Arc::new(AtomicUsize::new(0));
@@ -51,28 +69,50 @@ async fn main() {
         let file = Arc::clone(&file);
 
         let handle = task::spawn_blocking(move || {
+            // Per-thread CSPRNG: seed ONCE from full OS entropy (the profanity-safe
+            // requirement — full-entropy seed, not a weak counter), then stream keys
+            // from a fast userspace ChaCha CSPRNG instead of hitting the OS entropy
+            // source on every key. Same cryptographic quality, far less overhead.
+            let mut rng = StdRng::from_entropy();
+            // Accumulate the generated count locally and flush to the shared atomic
+            // in batches — a per-iteration atomic add across every thread bounces one
+            // cache line and would dominate the hot loop.
+            let mut local_generated: usize = 0;
+
             loop {
                 if stop_signal.load(Ordering::Relaxed) {
                     break;
                 }
 
-                let signer = SigningKey::random(&mut OsRng);
+                let signer = SigningKey::random(&mut rng);
                 let address = secret_key_to_address(&signer);
-
-                let max_zero_count_value = max_zero_count.load(Ordering::Relaxed);
-                let mut zero_count = 0;
                 let address_bytes = address.as_bytes();
-                for &byte in &address_bytes[0..] {
+
+                // Cheap raw-byte leading-zero-nibble count — the only work on the
+                // hot path (no allocation, no formatting).
+                let mut zero_count = 0usize;
+                for &byte in address_bytes {
                     if byte == 0 {
                         zero_count += 2;
                     } else {
-                        zero_count += byte.leading_zeros() as usize / 4;
+                        zero_count += (byte.leading_zeros() / 4) as usize;
                         break;
                     }
                 }
 
-                if zero_count < max_zero_count_value {
-                    total_generated.fetch_add(1, Ordering::Relaxed);
+                local_generated += 1;
+                if local_generated >= COUNTER_FLUSH {
+                    total_generated.fetch_add(local_generated, Ordering::Relaxed);
+                    local_generated = 0;
+                }
+
+                // Gate ALL expensive work (string format, repeat-char scan, locks,
+                // file IO) behind cheap integer checks that are almost always false:
+                // below the "interesting" floor of 3, or below the current best.
+                // Output-equivalent to the original (nothing < 3 was ever saved; the
+                // original merely churned max_zero_count on sub-3 values).
+                let current_max = max_zero_count.load(Ordering::Relaxed);
+                if zero_count < 3 || zero_count < current_max {
                     continue;
                 }
 
@@ -86,39 +126,37 @@ async fn main() {
                         } else {
                             (Some(c), max_count.max(current_count), 1)
                         }
-                    }).1;
+                    })
+                    .1;
 
-                let mex_chars_in_order_value = max_order_chars.load(Ordering::Relaxed);
-                if chars_in_order < mex_chars_in_order_value && zero_count == max_zero_count_value {
-                    total_generated.fetch_add(1, Ordering::Relaxed);
+                let max_order_value = max_order_chars.load(Ordering::Relaxed);
+                // Same zero count as the best but not more repeating chars → skip.
+                if zero_count == current_max && chars_in_order < max_order_value {
                     continue;
                 }
 
                 max_zero_count.store(zero_count, Ordering::SeqCst);
-                // ignore simple addresses
-                if zero_count < 3 {
-                    total_generated.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-
-                if chars_in_order > mex_chars_in_order_value {
+                if chars_in_order > max_order_value {
                     max_order_chars.store(chars_in_order, Ordering::SeqCst);
                 }
 
                 let wallet = Wallet::new_with_signer(signer, address, 1);
                 let private_key = hex::encode(wallet.signer().to_bytes());
 
+                // Flush the local counter before the (rare) report so the logged and
+                // printed running total is current.
+                total_generated.fetch_add(local_generated, Ordering::Relaxed);
+                local_generated = 0;
+                let generated_total = total_generated.load(Ordering::Relaxed);
+
                 {
                     let mut file = file.lock().unwrap();
                     writeln!(
                         file,
                         "{}\t{}\t{}\t{}",
-                        total_generated.load(Ordering::Relaxed),
-                        address_str,
-                        zero_count,
-                        private_key
+                        generated_total, address_str, zero_count, private_key
                     )
-                        .expect("Unable to write data to file");
+                    .expect("Unable to write data to file");
                 }
 
                 {
@@ -130,12 +168,14 @@ async fn main() {
                     "New best address with {} leading zeros and {} repeating characters: {}",
                     zero_count, chars_in_order, address_str
                 );
-                total_generated.fetch_add(1, Ordering::Relaxed);
 
                 if zero_count >= max_zeros {
                     break;
                 }
             }
+
+            // Flush any unreported local count on exit.
+            total_generated.fetch_add(local_generated, Ordering::Relaxed);
         });
 
         handles.push(handle);

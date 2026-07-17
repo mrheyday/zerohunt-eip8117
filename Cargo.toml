@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rand = "0.8.5"
+# Pinned to 0.8 to match k256 0.13 (via ethers 2.0.14), which bounds
+# `SigningKey::random` on rand_core 0.6 traits. rand 0.9/0.10 use rand_core
+# 0.9/0.10 and both move `OsRng` out of `rand::rngs` AND break that bound.
+rand = "0.8"
 ethers = { version = "2.0.14", default-features = false, features = ["ledger"] }
 tokio = { version = "1.41.0", default-features = false, features = ["rt", "rt-multi-thread", "signal", "macros"] }
 num_cpus = "1.16.0"
+metal = "0.33.0"
