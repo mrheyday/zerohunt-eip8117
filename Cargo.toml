@@ -21,7 +21,7 @@ path = "src/bin/gpu.rs"
 # 0.9/0.10 and both move `OsRng` out of `rand::rngs` AND break that bound.
 rand = "0.8"
 ethers = { version = "2.0.14", default-features = false, features = ["ledger"] }
-tokio = { version = "1.41.0", default-features = false, features = ["rt", "rt-multi-thread", "signal", "macros"] }
+tokio = { version = "1.41.0", default-features = false, features = ["rt", "rt-multi-thread", "signal", "macros", "time"] }
 num_cpus = "1.16.0"
 metal = "0.33.0"
 
