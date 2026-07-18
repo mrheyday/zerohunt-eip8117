@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::task;
 use std::time::{Duration, Instant};
 use ethers::core::k256::ecdsa::SigningKey;
+use zerohunt::erc8117;
 
 /// Iterations each worker accumulates before flushing to the shared
 /// generated-counter atomic (reduces cross-thread cache-line contention).
@@ -117,6 +118,14 @@ async fn main() {
                 }
 
                 let address_str = format!("{:?}", address);
+                // Invariant: the raw-byte leading-zero-nibble count (`zero_count`)
+                // and the hex-string count ERC-8117 uses must never diverge --
+                // they are two independent code paths over the same address.
+                debug_assert_eq!(
+                    zero_count,
+                    erc8117::count_leading_zeros(&address_str),
+                    "byte-count and hex-string zero-nibble count disagree for {address_str}"
+                );
                 let chars_in_order = address_str
                     .chars()
                     .skip(zero_count + 2)
@@ -151,10 +160,16 @@ async fn main() {
 
                 {
                     let mut file = file.lock().unwrap();
+                    // ERC-8117 subscript form, NON-truncated -> lossless and
+                    // reversible (0x0<sub-n> + full remainder reconstructs the
+                    // address), so this column stays machine-recoverable on its
+                    // own. Sub-threshold hits (n < 4) pass through as raw hex.
+                    let address_notated =
+                        erc8117::format_address(&address_str, erc8117::Mode::Subscript, false);
                     writeln!(
                         file,
                         "{}\t{}\t{}\t{}",
-                        generated_total, address_str, zero_count, private_key
+                        generated_total, address_notated, zero_count, private_key
                     )
                     .expect("Unable to write data to file");
                 }
@@ -164,9 +179,11 @@ async fn main() {
                     *best_wallet_lock = Some(wallet);
                 }
 
+                // ERC-8117 both-modes, truncated (first4…last4) -- surfaces the
+                // high-entropy suffix per the anti-poisoning intent.
                 println!(
                     "New best address with {} leading zeros and {} repeating characters: {}",
-                    zero_count, chars_in_order, address_str
+                    zero_count, chars_in_order, erc8117::format_both(&address_str, true)
                 );
 
                 if zero_count >= max_zeros {
@@ -205,8 +222,12 @@ async fn main() {
 
     let best_wallet_lock = best_wallet.lock().unwrap();
     if let Some(wallet) = &*best_wallet_lock {
+        let addr_str = format!("{:?}", wallet.address());
         println!("Found wallet with the most leading zeros:");
-        println!("Address: {:?}", wallet.address());
+        // Raw hex for copy/paste + the ERC-8117 forms (non-truncated -> the full
+        // address is preserved, just with the leading-zero run compacted).
+        println!("Address (raw):      {}", addr_str);
+        println!("Address (ERC-8117): {}", erc8117::format_both(&addr_str, false));
         println!("Private Key: {}", hex::encode(wallet.signer().to_bytes()));
     } else {
         println!("No wallet found.");
