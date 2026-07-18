@@ -3354,6 +3354,7 @@ dependencies = [
  "metal",
  "num_cpus",
  "rand 0.8.7",
+ "tempfile",
  "tokio",
 ]
 
