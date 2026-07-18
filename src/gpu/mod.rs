@@ -6,6 +6,22 @@ pub struct MetalContext {
     pub queue: CommandQueue,
 }
 
+/// A verified-candidate mining hit: a private key whose derived Ethereum
+/// address has `zeros` leading zero nibbles (counted by the same semantics as
+/// `src/main.rs`'s CPU tool). Callers MUST re-verify via
+/// `MetalContext::verify_hit` before trusting `address` -- see `dispatch_mine`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hit {
+    pub privkey: [u8; 32],
+    pub address: [u8; 20],
+    pub zeros: u8,
+}
+
+/// Must match `HIT_STRIDE` in `kernels/miner.metal`.
+const MINE_HIT_STRIDE: usize = 64;
+/// Must match `MAX_HITS` in `kernels/miner.metal`.
+const MINE_MAX_HITS: usize = 1024;
+
 impl MetalContext {
     pub fn new() -> Self {
         let device = Device::system_default().expect("no Metal device");
@@ -238,7 +254,7 @@ impl MetalContext {
         );
         let counters_buf = self.device.new_buffer_with_data(
             counters.as_ptr() as *const std::ffi::c_void,
-            (counters.len() * std::mem::size_of::<u64>()) as u64,
+            std::mem::size_of_val(counters) as u64,
             MTLResourceOptions::StorageModeShared,
         );
         let out_priv_buf = self
@@ -272,6 +288,128 @@ impl MetalContext {
                 let mut addr = [0u8; 20];
                 addr.copy_from_slice(&addr_bytes[i * 20..i * 20 + 20]);
                 (pk, addr)
+            })
+            .collect()
+    }
+
+    /// Search `iters` candidate keys per thread (one thread per
+    /// `(seed, base_counter)` pair, counters `base_counters[i]..base_counters[i]+iters`)
+    /// via `kernels/miner.metal`'s `mine` kernel, returning every derived
+    /// address with `>= threshold` leading-zero nibbles (bounded to at most
+    /// 1024 hits per call -- extras in a saturated batch are silently
+    /// dropped on the GPU side; callers on a tight loop should keep
+    /// `threshold` high enough that a batch rarely saturates).
+    ///
+    /// SECURITY: every returned `Hit` is a GPU-derived candidate only. Callers
+    /// MUST re-verify each one with `verify_hit` before treating `address` as
+    /// trustworthy (that host-side gate is what the CLI's per-hit hard-abort
+    /// enforces).
+    pub fn dispatch_mine(
+        &self,
+        seeds: &[[u8; 32]],
+        base_counters: &[u64],
+        iters: u32,
+        threshold: u32,
+    ) -> Vec<Hit> {
+        assert_eq!(
+            seeds.len(),
+            base_counters.len(),
+            "seeds/base_counters length mismatch"
+        );
+        let n = seeds.len();
+
+        let mut seed_bytes = vec![0u8; n * 32];
+        for (i, s) in seeds.iter().enumerate() {
+            seed_bytes[i * 32..i * 32 + 32].copy_from_slice(s);
+        }
+
+        let keccak_src = include_str!("../../kernels/keccak.metal");
+        let field_src = include_str!("../../kernels/field.metal");
+        let ec_src = include_str!("../../kernels/ec.metal");
+        let miner_src = include_str!("../../kernels/miner.metal");
+        let src = format!("{keccak_src}\n{field_src}\n{ec_src}\n{miner_src}");
+
+        let lib = self
+            .device
+            .new_library_with_source(&src, &CompileOptions::new())
+            .expect("kernel compile failed");
+        let func = lib.get_function("mine", None).expect("entry not found");
+        let pipeline = self
+            .device
+            .new_compute_pipeline_state_with_function(&func)
+            .expect("pipeline");
+
+        let seeds_buf = self.device.new_buffer_with_data(
+            seed_bytes.as_ptr() as *const std::ffi::c_void,
+            seed_bytes.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let counters_buf = self.device.new_buffer_with_data(
+            base_counters.as_ptr() as *const std::ffi::c_void,
+            std::mem::size_of_val(base_counters) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let iters_buf = self.device.new_buffer_with_data(
+            &iters as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let threshold_buf = self.device.new_buffer_with_data(
+            &threshold as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let hit_count_buf = self.device.new_buffer(
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        // MTLBuffer contents are undefined until written -- zero the atomic
+        // counter explicitly rather than relying on incidental zero pages.
+        unsafe {
+            std::ptr::write_bytes(
+                hit_count_buf.contents() as *mut u8,
+                0,
+                std::mem::size_of::<u32>(),
+            );
+        }
+        let hits_bytes = MINE_MAX_HITS * MINE_HIT_STRIDE;
+        let hits_buf = self
+            .device
+            .new_buffer(hits_bytes as u64, MTLResourceOptions::StorageModeShared);
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&pipeline);
+        enc.set_buffer(0, Some(&seeds_buf), 0);
+        enc.set_buffer(1, Some(&counters_buf), 0);
+        enc.set_buffer(2, Some(&iters_buf), 0);
+        enc.set_buffer(3, Some(&threshold_buf), 0);
+        enc.set_buffer(4, Some(&hit_count_buf), 0);
+        enc.set_buffer(5, Some(&hits_buf), 0);
+        enc.dispatch_thread_groups(MTLSize::new(n as u64, 1, 1), MTLSize::new(1, 1, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let found = unsafe { *(hit_count_buf.contents() as *const u32) } as usize;
+        let count = found.min(MINE_MAX_HITS);
+
+        let ptr = hits_buf.contents() as *const u8;
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, hits_bytes) };
+
+        (0..count)
+            .map(|i| {
+                let rec = i * MINE_HIT_STRIDE;
+                let mut privkey = [0u8; 32];
+                privkey.copy_from_slice(&bytes[rec..rec + 32]);
+                let mut address = [0u8; 20];
+                address.copy_from_slice(&bytes[rec + 32..rec + 52]);
+                let zeros = bytes[rec + 52];
+                Hit {
+                    privkey,
+                    address,
+                    zeros,
+                }
             })
             .collect()
     }
@@ -311,7 +449,7 @@ impl MetalContext {
         );
         let lens_buf = self.device.new_buffer_with_data(
             lens.as_ptr() as *const std::ffi::c_void,
-            (lens.len() * std::mem::size_of::<u32>()) as u64,
+            std::mem::size_of_val(lens) as u64,
             MTLResourceOptions::StorageModeShared,
         );
         let out_bytes = (n * 32) as u64;
@@ -333,7 +471,7 @@ impl MetalContext {
         let ptr = out_buf.contents() as *const u8;
         let bytes = unsafe { std::slice::from_raw_parts(ptr, n * 32) };
         bytes
-            .chunks_exact(32)
+            .as_chunks::<32>().0.iter()
             .map(|c| {
                 let mut out = [0u8; 32];
                 out.copy_from_slice(c);

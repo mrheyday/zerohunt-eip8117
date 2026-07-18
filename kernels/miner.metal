@@ -121,3 +121,90 @@ kernel void derive_test(device const uchar* seeds [[buffer(0)]],
         out_addr[gid * 20 + i] = addr[i];
     }
 }
+
+// Leading-zero-NIBBLE count of a 20-byte address, matching the CPU tool's
+// (src/main.rs) semantics exactly: walk bytes; a fully-zero byte contributes
+// 2 (both nibbles), then continue; the first nonzero byte contributes 1 iff
+// its top nibble is zero (equivalent to `byte.leading_zeros() / 4` on a u8 --
+// that expression is 1 for byte < 0x10 and 0 for byte >= 0x10), then stop.
+// Bytes after the first nonzero byte are never inspected (matches the CPU
+// `break`).
+inline uint leading_zero_nibbles(thread const uchar* addr20) {
+    uint zeros = 0;
+    for (uint b = 0; b < 20; b++) {
+        if (addr20[b] == 0) {
+            zeros += 2;
+        } else {
+            if ((addr20[b] >> 4) == 0) {
+                zeros += 1;
+            }
+            break;
+        }
+    }
+    return zeros;
+}
+
+// Bounded output ring for `mine`: each hit is a fixed HIT_STRIDE-byte record
+// {privkey[32], address[20], zeros(1), pad(11)} in `hits`, appended via
+// atomic_fetch_add on `hit_count`. Capacity is MAX_HITS records; slots beyond
+// that are silently dropped (the atomic counter still reflects the true
+// number found so the host can detect a saturated batch), so the host must
+// clamp its read to `min(hit_count, MAX_HITS)`.
+constant uint HIT_STRIDE = 64u;
+constant uint MAX_HITS = 1024u;
+
+// One thread per (seed,base_counter): iterate `iters` candidate keys
+// (counter = base_counters[gid] + it, it in [0, iters)), deriving + guarding
+// + scalar-multiplying + hashing exactly as derive_test does, and appending
+// any hit with >= threshold leading-zero nibbles to the bounded `hits`
+// buffer. Guard misses (privkey == 0 or >= secp256k1 order) are skipped, not
+// counted as candidates.
+kernel void mine(device const uchar* seeds [[buffer(0)]],
+                  device const ulong* base_counters [[buffer(1)]],
+                  constant uint& iters [[buffer(2)]],
+                  constant uint& threshold [[buffer(3)]],
+                  device atomic_uint* hit_count [[buffer(4)]],
+                  device uchar* hits [[buffer(5)]],
+                  uint gid [[thread_position_in_grid]]) {
+    thread uchar seed[32];
+    for (uint i = 0; i < 32; i++) {
+        seed[i] = seeds[gid * 32 + i];
+    }
+    ulong base = base_counters[gid];
+
+    for (uint it = 0; it < iters; it++) {
+        fe priv = derive_privkey(seed, base + (ulong)it);
+        if (!scalar_in_range(priv)) {
+            continue;
+        }
+
+        fe x, y;
+        scalarmul(priv, x, y);
+        thread uchar addr[20];
+        pubkey_to_address(x, y, addr);
+
+        uint zeros = leading_zero_nibbles(addr);
+        if (zeros < threshold) {
+            continue;
+        }
+
+        uint idx = atomic_fetch_add_explicit(hit_count, 1u, memory_order_relaxed);
+        if (idx >= MAX_HITS) {
+            continue; // batch saturated; drop (host clamps its read too)
+        }
+
+        thread uchar privBytes[32];
+        fe_to_bytes_be(priv, privBytes);
+        uint out = idx * HIT_STRIDE;
+        for (uint i = 0; i < 32; i++) {
+            hits[out + i] = privBytes[i];
+        }
+        for (uint i = 0; i < 20; i++) {
+            hits[out + 32 + i] = addr[i];
+        }
+        hits[out + 52] = (uchar)zeros;
+        for (uint i = 53; i < HIT_STRIDE; i++) {
+            hits[out + i] = 0;
+        }
+    }
+}

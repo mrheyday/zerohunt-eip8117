@@ -227,3 +227,29 @@ fn pipeline_privkey_and_address_match_host() {
         assert!(ctx.verify_hit(*priv_k, *addr), "verify_hit false for idx {i}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// mine kernel: per-thread iters loop + atomic hit-buffer append, cross-checked
+// via the same host re-derivation gate the CLI uses (verify_hit).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mine_finds_and_verifies_low_threshold() {
+    let ctx = MetalContext::new();
+    let seeds: Vec<[u8; 32]> = (0..256)
+        .map(|i| {
+            let mut s = [0u8; 32];
+            s[0] = (i & 0xff) as u8;
+            s[1] = (i >> 8) as u8;
+            s[31] = 0x11;
+            s
+        })
+        .collect();
+    let base: Vec<u64> = vec![0; seeds.len()];
+    let hits = ctx.dispatch_mine(&seeds, &base, 4096, 2); // >=2 leading zero nibbles
+    assert!(!hits.is_empty(), "should find >=2-zero addresses");
+    for h in &hits {
+        assert!(ctx.verify_hit(h.privkey, h.address), "hit failed host re-derivation");
+        assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
+    }
+}
