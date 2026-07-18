@@ -253,3 +253,43 @@ fn mine_finds_and_verifies_low_threshold() {
         assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
     }
 }
+
+// ---------------------------------------------------------------------------
+// End-to-end: the unified GPU driver (run_batches) dispatching real Metal
+// batches through the shared state funnel, not just the raw kernel.
+// ---------------------------------------------------------------------------
+
+/// End-to-end: the GPU driver, given a low target, finds a verified hit, writes
+/// the file, and trips `stop`. Mirrors the device-gated style of the other GPU
+/// tests in this file (runs on the Metal device present in CI/dev machines).
+#[test]
+fn gpu_driver_finds_and_reports_low_target() {
+    use std::sync::Arc;
+    use std::time::Instant;
+    use zerohunt::gpu::MetalContext;
+    use zerohunt::miner::gpu_driver::{run_batches, N_THREADS};
+    use zerohunt::miner::shared::MinerShared;
+
+    let ctx = MetalContext::new();
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    // target 2 => the very first batch should surface >=2-zero hits fast.
+    let shared = Arc::new(MinerShared::new(2, file.reopen().unwrap(), Instant::now()));
+
+    // Deterministic distinct seeds (content is irrelevant to correctness).
+    let mut seeds = vec![[0u8; 32]; N_THREADS];
+    for (i, s) in seeds.iter_mut().enumerate() {
+        s[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+    }
+
+    run_batches(&ctx, Arc::clone(&shared), &seeds);
+
+    assert!(shared.should_stop(), "should stop after reaching target 2");
+    let best = shared.take_best().expect("should have a best");
+    assert!(best.zeros >= 2, "best zeros {} >= target 2", best.zeros);
+
+    use std::io::Read;
+    let mut contents = String::new();
+    file.reopen().unwrap().read_to_string(&mut contents).unwrap();
+    assert!(!contents.trim().is_empty(), "file should have a hit line");
+}
