@@ -154,6 +154,46 @@ fn field_ops_match_host_mod_p() {
 }
 
 // ---------------------------------------------------------------------------
+// scalar_add_small (the incremental-walk's `(base+it) mod n` arithmetic):
+// GPU vs U256 host reference, including the explicit n-wrap boundary.
+// ---------------------------------------------------------------------------
+
+fn secp_n() -> U256 {
+    U256::from_str_radix(
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141",
+        16,
+    )
+    .unwrap()
+}
+
+#[test]
+fn scalar_add_small_matches_host_mod_n() {
+    let n = secp_n();
+    let ctx = MetalContext::new();
+
+    let bases = vec![
+        U256::from(1u32),
+        U256::from(1_000_000u32),
+        n - U256::from(2u32), // n-wrap boundary case
+        n - U256::from(2u32), // repeated: verify determinism
+    ];
+    let its = vec![5u32, 300u32, 0u32, 4u32];
+
+    let gpu = ctx.run_scalar_add_mod_n(&bases, &its);
+    for (i, (b, it)) in bases.iter().zip(its.iter()).enumerate() {
+        let want = addmod(*b, U256::from(*it), n);
+        assert_eq!(gpu[i], want, "scalar_add_small mismatch case {i}: base={b} it={it}");
+    }
+
+    // Explicit assertion that the wrap case actually wrapped (didn't just
+    // happen to equal the unwrapped sum), so this test would fail loudly if
+    // the conditional subtraction were missing or wrong.
+    // (n-2) + 4 = n+2, which mod n = 2
+    let wrapped = ctx.run_scalar_add_mod_n(&[n - U256::from(2u32)], &[4u32])[0];
+    assert_eq!(wrapped, U256::from(2u32), "n-2 + 4 mod n should wrap to 2");
+}
+
+// ---------------------------------------------------------------------------
 // secp256k1 EC scalar-mult (k*G -> affine pubkey) GPU vs k256 cross-check.
 // ---------------------------------------------------------------------------
 

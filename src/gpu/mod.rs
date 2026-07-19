@@ -143,6 +143,74 @@ impl MetalContext {
         limbs_to_u256(&out)
     }
 
+    /// Test-only: apply `scalar_add_small` (the incremental-walk's
+    /// `(base + it) mod n` arithmetic) on the GPU for each `(base, it)` pair
+    /// via `kernels/miner.metal`'s `scalar_add_mod_n_test`, returning the
+    /// result as a `U256`. `base` must already be reduced mod n (< n).
+    pub fn run_scalar_add_mod_n(&self, bases: &[U256], its: &[u32]) -> Vec<U256> {
+        assert_eq!(bases.len(), its.len(), "bases/its length mismatch");
+        let n = bases.len();
+        let mut base_limbs = vec![0u32; n * 8];
+        for (i, b) in bases.iter().enumerate() {
+            base_limbs[i * 8..i * 8 + 8].copy_from_slice(&u256_to_limbs(*b));
+        }
+
+        let keccak_src = include_str!("../../kernels/keccak.metal");
+        let field_src = include_str!("../../kernels/field.metal");
+        let ec_src = include_str!("../../kernels/ec.metal");
+        let miner_src = include_str!("../../kernels/miner.metal");
+        let src = format!("{keccak_src}\n{field_src}\n{ec_src}\n{miner_src}");
+
+        let lib = self
+            .device
+            .new_library_with_source(&src, &CompileOptions::new())
+            .expect("kernel compile failed");
+        let func = lib
+            .get_function("scalar_add_mod_n_test", None)
+            .expect("entry not found");
+        let pipeline = self
+            .device
+            .new_compute_pipeline_state_with_function(&func)
+            .expect("pipeline");
+
+        let base_buf = self.device.new_buffer_with_data(
+            base_limbs.as_ptr() as *const std::ffi::c_void,
+            (base_limbs.len() * std::mem::size_of::<u32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let its_buf = self.device.new_buffer_with_data(
+            its.as_ptr() as *const std::ffi::c_void,
+            std::mem::size_of_val(its) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let out_len = n * 8;
+        let out_buf = self.device.new_buffer(
+            (out_len * std::mem::size_of::<u32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&pipeline);
+        enc.set_buffer(0, Some(&base_buf), 0);
+        enc.set_buffer(1, Some(&its_buf), 0);
+        enc.set_buffer(2, Some(&out_buf), 0);
+        enc.dispatch_thread_groups(MTLSize::new(n as u64, 1, 1), MTLSize::new(1, 1, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let ptr = out_buf.contents() as *const u32;
+        let limbs = unsafe { std::slice::from_raw_parts(ptr, out_len) };
+        (0..n)
+            .map(|i| {
+                let mut l = [0u32; 8];
+                l.copy_from_slice(&limbs[i * 8..i * 8 + 8]);
+                limbs_to_u256(&l)
+            })
+            .collect()
+    }
+
     /// Compute the affine secp256k1 public key `k*G` for each 32-byte
     /// big-endian private key on the GPU via `kernels/ec.metal` (concatenated
     /// after `kernels/field.metal`, mirroring `run_field`'s source assembly).

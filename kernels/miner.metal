@@ -52,6 +52,62 @@ inline bool scalar_in_range(thread const fe& k) {
     return false; // k == SECP_N is out of range (n is not a valid scalar)
 }
 
+// True iff r >= SECP_N (both 8-limb little-endian), i.e. r is not yet reduced
+// into the canonical [0, SECP_N) range.
+inline bool scalar_ge_n(thread const fe& r) {
+    for (int i = 7; i >= 0; i--) {
+        if (r.v[i] != SECP_N[i]) {
+            return r.v[i] > SECP_N[i];
+        }
+    }
+    return true; // r == SECP_N
+}
+
+// (base + it) mod SECP_N, via a single conditional subtraction. Valid
+// whenever base < SECP_N (a scalar_in_range-guarded base) and
+// base + it < 2*SECP_N -- true for every `it` this codebase's batch sizes
+// use (a few hundred at most; SECP_N > 2^255), so at most one subtraction is
+// ever needed. Used to derive an incremental-walk candidate's private key
+// from its batch base without a full scalar multiplication.
+inline fe scalar_add_small(thread const fe& base, uint it) {
+    fe r = base;
+    ulong carry = (ulong)it;
+    for (int i = 0; i < 8 && carry != 0; i++) {
+        ulong s = (ulong)r.v[i] + carry;
+        r.v[i] = (uint)s;
+        carry = s >> 32;
+    }
+    if (scalar_ge_n(r)) {
+        long borrow = 0;
+        for (int i = 0; i < 8; i++) {
+            long d = (long)r.v[i] - (long)SECP_N[i] - borrow;
+            if (d < 0) {
+                d += 0x100000000L;
+                borrow = 1;
+            } else {
+                borrow = 0;
+            }
+            r.v[i] = (uint)d;
+        }
+    }
+    return r;
+}
+
+// Test-only: applies scalar_add_small to the gid-th (base, it) pair.
+kernel void scalar_add_mod_n_test(device const uint* bases [[buffer(0)]],
+                                   device const uint* its   [[buffer(1)]],
+                                   device uint* out         [[buffer(2)]],
+                                   uint gid [[thread_position_in_grid]]) {
+    fe base;
+    for (int i = 0; i < 8; i++) {
+        base.v[i] = bases[gid * 8 + i];
+    }
+    fe r = scalar_add_small(base, its[gid]);
+    for (int i = 0; i < 8; i++) {
+        out[gid * 8 + i] = r.v[i];
+    }
+}
+
 // privkey = keccak256(seed[32] || counter_le8), returned as an (unreduced --
 // see scalar_in_range) field element. Caller applies the scalar-range guard.
 inline fe derive_privkey(thread const uchar* seed, ulong counter) {
