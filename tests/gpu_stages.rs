@@ -194,6 +194,59 @@ fn scalar_add_small_matches_host_mod_n() {
 }
 
 // ---------------------------------------------------------------------------
+// Incremental Jacobian walk (Approach B core loop): GPU vs k256, including
+// the explicit n-wrap boundary.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn incremental_walk_matches_k256() {
+    use ethers::core::k256::ecdsa::SigningKey;
+    use ethers::utils::secret_key_to_address;
+    let n = secp_n();
+    let ctx = MetalContext::new();
+
+    let mut bases: Vec<[u8; 32]> = vec![
+        hex_to_32("0000000000000000000000000000000000000000000000000000000000000001"),
+        hex_to_32("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+    ];
+    // Explicit n-wrap boundary: base = n-2, walk 4 steps (crosses n at it=2).
+    let mut n_minus_2 = [0u8; 32];
+    (n - U256::from(2u32)).to_big_endian(&mut n_minus_2);
+    bases.push(n_minus_2);
+
+    let iters = 4u32;
+    let gpu = ctx.run_mine_incremental_raw(&bases, iters);
+
+    for (bi, base_bytes) in bases.iter().enumerate() {
+        let base = U256::from_big_endian(base_bytes);
+        for it in 0..iters {
+            let want_scalar = addmod(base, U256::from(it), n);
+            if want_scalar.is_zero() {
+                // Degenerate point at infinity: GPU must emit the all-zero
+                // sentinel, not a fabricated address.
+                assert_eq!(gpu[bi][it as usize].0, [0u8; 32], "base {bi} it {it}: expected zero-sentinel privkey");
+                assert_eq!(gpu[bi][it as usize].1, [0u8; 20], "base {bi} it {it}: expected zero-sentinel address");
+                continue;
+            }
+            let mut want_bytes = [0u8; 32];
+            want_scalar.to_big_endian(&mut want_bytes);
+            let sk = SigningKey::from_bytes((&want_bytes).into()).expect("canonical scalar");
+            let want_addr = secret_key_to_address(&sk);
+
+            let (gpu_priv, gpu_addr) = gpu[bi][it as usize];
+            assert_eq!(gpu_priv, want_bytes, "base {bi} it {it}: privkey mismatch");
+            assert_eq!(&gpu_addr[..], want_addr.as_bytes(), "base {bi} it {it}: address mismatch");
+        }
+    }
+
+    // The n-wrap base (index 2) must actually wrap within the tested window:
+    // n-2, n-1, 0 (degenerate), 1 -- assert the degenerate slot is exactly
+    // it=2, proving the boundary was really exercised.
+    let base = U256::from_big_endian(&bases[2]);
+    assert!(addmod(base, U256::from(2u32), n).is_zero(), "test setup: expected wrap at it=2");
+}
+
+// ---------------------------------------------------------------------------
 // secp256k1 EC scalar-mult (k*G -> affine pubkey) GPU vs k256 cross-check.
 // ---------------------------------------------------------------------------
 

@@ -137,6 +137,56 @@ inline void pubkey_to_address(fe x, fe y, thread uchar* out20) {
     }
 }
 
+// Test-only: given raw 256-bit bases (not keccak-derived) and a shared
+// `iters` count, walk `iters` incremental points per base and emit every
+// candidate's (privkey, address) pair unconditionally (no threshold gate).
+// Lets tests exercise the walk arithmetic -- including deliberately chosen
+// bases near the n-wrap boundary -- without needing a keccak preimage.
+// A degenerate point (base+it == 0 mod n, i.e. Jacobian Z == 0) writes an
+// all-zero privkey/address pair, which the host test asserts never occurs
+// for the bases it chooses (or explicitly checks for, at the wrap case).
+kernel void mine_incremental_raw_test(device const uint* bases [[buffer(0)]],
+                                       constant uint& iters     [[buffer(1)]],
+                                       device uchar* out_priv   [[buffer(2)]],
+                                       device uchar* out_addr   [[buffer(3)]],
+                                       uint gid [[thread_position_in_grid]]) {
+    fe base;
+    for (int i = 0; i < 8; i++) {
+        base.v[i] = bases[gid * 8 + i];
+    }
+
+    jpoint P = scalarmul_jacobian(base);
+    jpoint G = g_point();
+
+    for (uint it = 0; it < iters; it++) {
+        if (it > 0) {
+            P = j_add(P, G);
+        }
+        uint out = gid * iters + it;
+
+        if (fe_is_zero(P.Z)) {
+            for (uint i = 0; i < 32; i++) out_priv[out * 32 + i] = 0;
+            for (uint i = 0; i < 20; i++) out_addr[out * 20 + i] = 0;
+            continue;
+        }
+
+        fe zinv = fe_inv(P.Z);
+        fe zinv2 = fe_mul(zinv, zinv);
+        fe zinv3 = fe_mul(zinv2, zinv);
+        fe x = fe_mul(P.X, zinv2);
+        fe y = fe_mul(P.Y, zinv3);
+
+        thread uchar addr[20];
+        pubkey_to_address(x, y, addr);
+        for (uint i = 0; i < 20; i++) out_addr[out * 20 + i] = addr[i];
+
+        fe priv = scalar_add_small(base, it);
+        thread uchar privBytes[32];
+        fe_to_bytes_be(priv, privBytes);
+        for (uint i = 0; i < 32; i++) out_priv[out * 32 + i] = privBytes[i];
+    }
+}
+
 // One thread per (seed,counter): derive the privkey, guard its scalar range,
 // then (if in range) scalarmul + hash to the address. seeds are 32 bytes
 // each at seeds[gid*32], counters are one ulong each at counters[gid].

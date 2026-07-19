@@ -211,6 +211,107 @@ impl MetalContext {
             .collect()
     }
 
+    /// Test-only: run the incremental Jacobian walk (Approach B's core loop)
+    /// from `iters` explicit 256-bit `bases` (not keccak-derived), via
+    /// `kernels/miner.metal`'s `mine_incremental_raw_test`. Returns, per base,
+    /// `iters` `(privkey, address)` pairs for `(base+0)*G .. (base+iters-1)*G`.
+    /// Lets tests target exact scalar values (e.g. the n-wrap boundary).
+    pub fn run_mine_incremental_raw(
+        &self,
+        bases: &[[u8; 32]],
+        iters: u32,
+    ) -> Vec<Vec<([u8; 32], [u8; 20])>> {
+        let n = bases.len();
+        let mut in_limbs = vec![0u32; n * 8];
+        for (i, k) in bases.iter().enumerate() {
+            for limb in 0..8 {
+                let hi = 28 - limb * 4;
+                in_limbs[i * 8 + limb] =
+                    u32::from_be_bytes([k[hi], k[hi + 1], k[hi + 2], k[hi + 3]]);
+            }
+        }
+
+        // NOTE (corrected post-Task-2 review): `miner.metal`'s pre-existing
+        // `pubkey_to_address` (called by our new kernel) and other kernels
+        // call `keccak256`, so the whole file needs `keccak.metal` present
+        // in the concatenation even though our entry point doesn't call it
+        // directly -- MSL requires every symbol referenced anywhere in the
+        // translation unit to resolve, not just in the dispatched kernel's
+        // call graph. Use the same 4-file concatenation `dispatch_mine` uses.
+        let keccak_src = include_str!("../../kernels/keccak.metal");
+        let field_src = include_str!("../../kernels/field.metal");
+        let ec_src = include_str!("../../kernels/ec.metal");
+        let miner_src = include_str!("../../kernels/miner.metal");
+        let src = format!("{keccak_src}\n{field_src}\n{ec_src}\n{miner_src}");
+
+        let lib = self
+            .device
+            .new_library_with_source(&src, &CompileOptions::new())
+            .expect("kernel compile failed");
+        let func = lib
+            .get_function("mine_incremental_raw_test", None)
+            .expect("entry not found");
+        let pipeline = self
+            .device
+            .new_compute_pipeline_state_with_function(&func)
+            .expect("pipeline");
+
+        let in_buf = self.device.new_buffer_with_data(
+            in_limbs.as_ptr() as *const std::ffi::c_void,
+            (in_limbs.len() * std::mem::size_of::<u32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let iters_arr = [iters];
+        let iters_buf = self.device.new_buffer_with_data(
+            iters_arr.as_ptr() as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let priv_len = n * (iters as usize) * 32;
+        let addr_len = n * (iters as usize) * 20;
+        let out_priv_buf = self
+            .device
+            .new_buffer(priv_len as u64, MTLResourceOptions::StorageModeShared);
+        let out_addr_buf = self
+            .device
+            .new_buffer(addr_len as u64, MTLResourceOptions::StorageModeShared);
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&pipeline);
+        enc.set_buffer(0, Some(&in_buf), 0);
+        enc.set_buffer(1, Some(&iters_buf), 0);
+        enc.set_buffer(2, Some(&out_priv_buf), 0);
+        enc.set_buffer(3, Some(&out_addr_buf), 0);
+        enc.dispatch_thread_groups(MTLSize::new(n as u64, 1, 1), MTLSize::new(1, 1, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let priv_ptr = out_priv_buf.contents() as *const u8;
+        let priv_bytes = unsafe { std::slice::from_raw_parts(priv_ptr, priv_len) };
+        let addr_ptr = out_addr_buf.contents() as *const u8;
+        let addr_bytes = unsafe { std::slice::from_raw_parts(addr_ptr, addr_len) };
+
+        (0..n)
+            .map(|i| {
+                (0..iters as usize)
+                    .map(|it| {
+                        let mut pk = [0u8; 32];
+                        pk.copy_from_slice(
+                            &priv_bytes[(i * iters as usize + it) * 32..(i * iters as usize + it) * 32 + 32],
+                        );
+                        let mut addr = [0u8; 20];
+                        addr.copy_from_slice(
+                            &addr_bytes[(i * iters as usize + it) * 20..(i * iters as usize + it) * 20 + 20],
+                        );
+                        (pk, addr)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     /// Compute the affine secp256k1 public key `k*G` for each 32-byte
     /// big-endian private key on the GPU via `kernels/ec.metal` (concatenated
     /// after `kernels/field.metal`, mirroring `run_field`'s source assembly).
