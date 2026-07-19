@@ -12,8 +12,12 @@ as cryptographically sound** as the CPU path — every emitted private key must 
 full-entropy and unpredictable.
 
 Non-goal (this spec): the incremental point-addition speed optimization
-("Approach B" / profanity-style). That is a possible follow-up, gated on Approach
-A being proven correct and benchmarked.
+("Approach B" / profanity-style). Implemented as a follow-up once Approach A
+was proven correct and benchmarked — see
+`docs/specs/2026-07-19-gpu-incremental-ec-miner-design.md`. Approach A's
+kernel (`mine`) stays in the tree as the reference/fallback path; the
+unified driver (`gpu_driver::run_batches`) now dispatches Approach B's
+`mine_incremental` by default.
 
 ## Background / why not just "use the GPU"
 
