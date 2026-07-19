@@ -314,3 +314,83 @@ kernel void mine(device const uchar* seeds [[buffer(0)]],
         }
     }
 }
+
+// Approach B: one thread per (seed, base_counter). Derives a single batch
+// base scalar (exactly like `mine`'s per-candidate derive_privkey, but
+// called once per batch instead of once per candidate), computes base*G
+// once, then walks `iters` candidates via cheap Jacobian point additions
+// instead of `iters` full scalar multiplications. Emits any candidate with
+// >= threshold leading-zero nibbles to the same bounded `hits` buffer `mine`
+// uses (identical wire format), so host dispatch code is shared.
+//
+// NOTE: placed after `mine` (rather than immediately after
+// `mine_incremental_raw_test` as the plan's snippet ordering suggested) so
+// that `leading_zero_nibbles`/`HIT_STRIDE`/`MAX_HITS` -- declared between
+// `mine_incremental_raw_test` and `mine` above -- are already in scope;
+// Metal, like C/C++, requires a symbol's declaration to precede its use
+// within a translation unit.
+kernel void mine_incremental(device const uchar* seeds [[buffer(0)]],
+                              device const ulong* base_counters [[buffer(1)]],
+                              constant uint& iters [[buffer(2)]],
+                              constant uint& threshold [[buffer(3)]],
+                              device atomic_uint* hit_count [[buffer(4)]],
+                              device uchar* hits [[buffer(5)]],
+                              uint gid [[thread_position_in_grid]]) {
+    thread uchar seed[32];
+    for (uint i = 0; i < 32; i++) {
+        seed[i] = seeds[gid * 32 + i];
+    }
+    ulong base_counter = base_counters[gid];
+
+    fe base = derive_privkey(seed, base_counter);
+    if (!scalar_in_range(base)) {
+        return; // batch-base guard miss (probability ~2^-128): skip whole batch
+    }
+
+    jpoint P = scalarmul_jacobian(base);
+    jpoint G = g_point();
+
+    for (uint it = 0; it < iters; it++) {
+        if (it > 0) {
+            P = j_add(P, G);
+        }
+        if (fe_is_zero(P.Z)) {
+            continue; // base+it == 0 (mod n): invalid scalar, skip candidate
+        }
+
+        fe zinv = fe_inv(P.Z);
+        fe zinv2 = fe_mul(zinv, zinv);
+        fe zinv3 = fe_mul(zinv2, zinv);
+        fe x = fe_mul(P.X, zinv2);
+        fe y = fe_mul(P.Y, zinv3);
+
+        thread uchar addr[20];
+        pubkey_to_address(x, y, addr);
+
+        uint zeros = leading_zero_nibbles(addr);
+        if (zeros < threshold) {
+            continue;
+        }
+
+        fe priv = scalar_add_small(base, it);
+
+        uint idx = atomic_fetch_add_explicit(hit_count, 1u, memory_order_relaxed);
+        if (idx >= MAX_HITS) {
+            continue; // batch saturated; drop (host clamps its read too)
+        }
+
+        thread uchar privBytes[32];
+        fe_to_bytes_be(priv, privBytes);
+        uint out = idx * HIT_STRIDE;
+        for (uint i = 0; i < 32; i++) {
+            hits[out + i] = privBytes[i];
+        }
+        for (uint i = 0; i < 20; i++) {
+            hits[out + 32 + i] = addr[i];
+        }
+        hits[out + 52] = (uchar)zeros;
+        for (uint i = 53; i < HIT_STRIDE; i++) {
+            hits[out + i] = 0;
+        }
+    }
+}

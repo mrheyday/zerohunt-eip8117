@@ -463,11 +463,13 @@ impl MetalContext {
 
     /// Search `iters` candidate keys per thread (one thread per
     /// `(seed, base_counter)` pair, counters `base_counters[i]..base_counters[i]+iters`)
-    /// via `kernels/miner.metal`'s `mine` kernel, returning every derived
-    /// address with `>= threshold` leading-zero nibbles (bounded to at most
-    /// 1024 hits per call -- extras in a saturated batch are silently
-    /// dropped on the GPU side; callers on a tight loop should keep
-    /// `threshold` high enough that a batch rarely saturates).
+    /// via `kernels/miner.metal`'s `mine` kernel (Approach A: every candidate
+    /// is an independent keccak-derived scalar, full scalar-mult each),
+    /// returning every derived address with `>= threshold` leading-zero
+    /// nibbles (bounded to at most 1024 hits per call -- extras in a
+    /// saturated batch are silently dropped on the GPU side; callers on a
+    /// tight loop should keep `threshold` high enough that a batch rarely
+    /// saturates).
     ///
     /// SECURITY: every returned `Hit` is a GPU-derived candidate only. Callers
     /// MUST re-verify each one with `verify_hit` before treating `address` as
@@ -475,6 +477,42 @@ impl MetalContext {
     /// enforces).
     pub fn dispatch_mine(
         &self,
+        seeds: &[[u8; 32]],
+        base_counters: &[u64],
+        iters: u32,
+        threshold: u32,
+    ) -> Vec<Hit> {
+        self.dispatch_mine_kernel("mine", seeds, base_counters, iters, threshold)
+    }
+
+    /// Search `iters` candidate keys per thread via `kernels/miner.metal`'s
+    /// `mine_incremental` kernel (Approach B: one keccak-derived base scalar
+    /// per thread per batch, then `iters` cheap Jacobian point additions
+    /// instead of `iters` full scalar multiplications -- see
+    /// `docs/specs/2026-07-19-gpu-incremental-ec-miner-design.md` for the
+    /// cost model and the security-model discussion of why this is weaker
+    /// than, but not unsafe compared to, `dispatch_mine`'s Approach A).
+    /// Same wire format, same buffer layout, same 1024-hit cap as `mine`.
+    ///
+    /// SECURITY: same requirement as `dispatch_mine` -- callers MUST
+    /// re-verify every returned `Hit` with `verify_hit` before trusting it.
+    pub fn dispatch_mine_incremental(
+        &self,
+        seeds: &[[u8; 32]],
+        base_counters: &[u64],
+        iters: u32,
+        threshold: u32,
+    ) -> Vec<Hit> {
+        self.dispatch_mine_kernel("mine_incremental", seeds, base_counters, iters, threshold)
+    }
+
+    /// Shared dispatch body for `dispatch_mine`/`dispatch_mine_incremental`:
+    /// both kernels have an identical buffer signature (seeds, base_counters,
+    /// iters, threshold, hit_count, hits), differing only in per-candidate
+    /// math, so only the compiled entry-point name changes.
+    fn dispatch_mine_kernel(
+        &self,
+        entry: &str,
         seeds: &[[u8; 32]],
         base_counters: &[u64],
         iters: u32,
@@ -502,7 +540,7 @@ impl MetalContext {
             .device
             .new_library_with_source(&src, &CompileOptions::new())
             .expect("kernel compile failed");
-        let func = lib.get_function("mine", None).expect("entry not found");
+        let func = lib.get_function(entry, None).expect("entry not found");
         let pipeline = self
             .device
             .new_compute_pipeline_state_with_function(&func)
