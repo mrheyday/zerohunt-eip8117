@@ -219,9 +219,18 @@ Add this method inside `impl MetalContext` (e.g. directly after `run_field`, whi
             base_limbs[i * 8..i * 8 + 8].copy_from_slice(&u256_to_limbs(*b));
         }
 
-        let miner_src = include_str!("../../kernels/miner.metal");
+        // NOTE (corrected during Task 2 review): `field.metal` + `miner.metal`
+        // does NOT compile standalone -- miner.metal's pre-existing
+        // `scalar_in_range` calls `fe_is_zero` (defined in `ec.metal`), and
+        // other pre-existing kernels in the file call `keccak256`. MSL
+        // requires every symbol referenced anywhere in the file to resolve,
+        // regardless of whether the dispatched entry point reaches it. Use
+        // the same 4-file concatenation `dispatch_mine` uses.
+        let keccak_src = include_str!("../../kernels/keccak.metal");
         let field_src = include_str!("../../kernels/field.metal");
-        let src = format!("{field_src}\n{miner_src}");
+        let ec_src = include_str!("../../kernels/ec.metal");
+        let miner_src = include_str!("../../kernels/miner.metal");
+        let src = format!("{keccak_src}\n{field_src}\n{ec_src}\n{miner_src}");
 
         let lib = self
             .device
@@ -317,7 +326,9 @@ fn scalar_add_small_matches_host_mod_n() {
     // happen to equal the unwrapped sum), so this test would fail loudly if
     // the conditional subtraction were missing or wrong.
     let wrapped = ctx.run_scalar_add_mod_n(&[n - U256::from(2u32)], &[4u32])[0];
-    assert_eq!(wrapped, U256::from(1u32), "n-2 + 4 mod n should wrap to 1");
+    // (n-2) + 4 = n+2 ≡ 2 (mod n) -- corrected during Task 2 review; the
+    // original plan text asserted 1 here, which is arithmetically wrong.
+    assert_eq!(wrapped, U256::from(2u32), "n-2 + 4 mod n should wrap to 2");
 }
 ```
 
@@ -427,10 +438,18 @@ Add inside `impl MetalContext`, after `run_scalar_add_mod_n` from Task 2:
             }
         }
 
+        // NOTE (corrected post-Task-2 review): `miner.metal`'s pre-existing
+        // `pubkey_to_address` (called by our new kernel) and other kernels
+        // call `keccak256`, so the whole file needs `keccak.metal` present
+        // in the concatenation even though our entry point doesn't call it
+        // directly -- MSL requires every symbol referenced anywhere in the
+        // translation unit to resolve, not just in the dispatched kernel's
+        // call graph. Use the same 4-file concatenation `dispatch_mine` uses.
+        let keccak_src = include_str!("../../kernels/keccak.metal");
         let field_src = include_str!("../../kernels/field.metal");
         let ec_src = include_str!("../../kernels/ec.metal");
         let miner_src = include_str!("../../kernels/miner.metal");
-        let src = format!("{field_src}\n{ec_src}\n{miner_src}");
+        let src = format!("{keccak_src}\n{field_src}\n{ec_src}\n{miner_src}");
 
         let lib = self
             .device
