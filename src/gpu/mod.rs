@@ -1,9 +1,15 @@
 use ethers::types::U256;
-use metal::{CommandQueue, CompileOptions, Device, MTLResourceOptions, MTLSize};
+use metal::{
+    CommandQueue, CompileOptions, ComputePipelineState, Device, MTLResourceOptions, MTLSize,
+};
 
 pub struct MetalContext {
     pub device: Device,
     pub queue: CommandQueue,
+    /// The `mine` compute pipeline, compiled ONCE at construction and reused by
+    /// every `dispatch_mine` batch. Compiling the full secp256k1+keccak MSL per
+    /// batch was the GPU path's dominant cost (it made the GPU slower than CPU).
+    mine_pipeline: ComputePipelineState,
 }
 
 /// A verified-candidate mining hit: a private key whose derived Ethereum
@@ -26,7 +32,31 @@ impl MetalContext {
     pub fn new() -> Self {
         let device = Device::system_default().expect("no Metal device");
         let queue = device.new_command_queue();
-        Self { device, queue }
+        let mine_pipeline = Self::build_mine_pipeline(&device);
+        Self {
+            device,
+            queue,
+            mine_pipeline,
+        }
+    }
+
+    /// Assemble the concatenated miner MSL (keccak+field+ec+miner) and build the
+    /// `mine` compute pipeline. Called once from `new()`; the result is cached in
+    /// `mine_pipeline` and reused by every `dispatch_mine` call, so the hot
+    /// mining loop never recompiles the kernel.
+    fn build_mine_pipeline(device: &Device) -> ComputePipelineState {
+        let keccak_src = include_str!("../../kernels/keccak.metal");
+        let field_src = include_str!("../../kernels/field.metal");
+        let ec_src = include_str!("../../kernels/ec.metal");
+        let miner_src = include_str!("../../kernels/miner.metal");
+        let src = format!("{keccak_src}\n{field_src}\n{ec_src}\n{miner_src}");
+        let lib = device
+            .new_library_with_source(&src, &CompileOptions::new())
+            .expect("miner kernel compile failed");
+        let func = lib.get_function("mine", None).expect("mine entry not found");
+        device
+            .new_compute_pipeline_state_with_function(&func)
+            .expect("mine pipeline")
     }
 
     /// Compile `src`, dispatch `entry` over `tgroups*tperg` threads writing a
@@ -323,22 +353,8 @@ impl MetalContext {
             seed_bytes[i * 32..i * 32 + 32].copy_from_slice(s);
         }
 
-        let keccak_src = include_str!("../../kernels/keccak.metal");
-        let field_src = include_str!("../../kernels/field.metal");
-        let ec_src = include_str!("../../kernels/ec.metal");
-        let miner_src = include_str!("../../kernels/miner.metal");
-        let src = format!("{keccak_src}\n{field_src}\n{ec_src}\n{miner_src}");
-
-        let lib = self
-            .device
-            .new_library_with_source(&src, &CompileOptions::new())
-            .expect("kernel compile failed");
-        let func = lib.get_function("mine", None).expect("entry not found");
-        let pipeline = self
-            .device
-            .new_compute_pipeline_state_with_function(&func)
-            .expect("pipeline");
-
+        // Reuse the pre-compiled `mine` pipeline (built once in `new()`) — a hot
+        // mining loop no longer recompiles the full MSL on every batch.
         let seeds_buf = self.device.new_buffer_with_data(
             seed_bytes.as_ptr() as *const std::ffi::c_void,
             seed_bytes.len() as u64,
@@ -379,7 +395,7 @@ impl MetalContext {
 
         let cmd = self.queue.new_command_buffer();
         let enc = cmd.new_compute_command_encoder();
-        enc.set_compute_pipeline_state(&pipeline);
+        enc.set_compute_pipeline_state(&self.mine_pipeline);
         enc.set_buffer(0, Some(&seeds_buf), 0);
         enc.set_buffer(1, Some(&counters_buf), 0);
         enc.set_buffer(2, Some(&iters_buf), 0);
