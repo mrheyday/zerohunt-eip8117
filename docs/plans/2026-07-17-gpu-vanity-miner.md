@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a Metal-GPU Ethereum vanity-address miner (`zerohunt-gpu`) that searches for leading-zero addresses far faster than the CPU tool, emitting only full-entropy, CPU-verified private keys.
+**Goal:** Build a Metal-GPU Ethereum vanity-address miner (`nullforge-gpu`) that searches for leading-zero addresses far faster than the CPU tool, emitting only full-entropy, CPU-verified private keys.
 
 **Architecture:** A new Rust binary drives Apple Metal compute. GPU threads each derive full-entropy keys (`Keccak256(thread_seed‖counter)`), run secp256k1 scalar-mult + Keccak-256 to derive the address, and report hits; the host re-verifies every hit against `k256` before trusting it. Built in stages behind test gates: Metal harness → Keccak kernel → field arithmetic → EC scalar-mult → full pipeline → miner loop.
 
@@ -29,7 +29,7 @@
 - Create `src/lib.rs` — exposes `pub mod gpu;` so integration tests can drive the Metal code. (Does not affect the existing `main.rs` binary.)
 - Create `kernels/keccak.metal`, `kernels/field.metal`, `kernels/ec.metal`, `kernels/miner.metal` — MSL source, embedded via `include_str!`. Later kernels `#include` earlier ones by concatenation in the host (Metal runtime compile takes one combined source string).
 - Create `tests/gpu_stages.rs` — integration tests for each stage (they need the Metal device, so they live at integration-test level, run via `cargo test`).
-- Modify `Cargo.toml` — add `[lib]`, the `[[bin]] name = "zerohunt-gpu"`, and the `metal` dependency.
+- Modify `Cargo.toml` — add `[lib]`, the `[[bin]] name = "nullforge-gpu"`, and the `metal` dependency.
 
 ---
 
@@ -52,15 +52,15 @@
 
 ```toml
 [lib]
-name = "zerohunt"
+name = "nullforge"
 path = "src/lib.rs"
 
 [[bin]]
-name = "zerohunt"
+name = "nullforge"
 path = "src/main.rs"
 
 [[bin]]
-name = "zerohunt-gpu"
+name = "nullforge-gpu"
 path = "src/bin/gpu.rs"
 
 [dependencies]
@@ -85,7 +85,7 @@ kernel void echo(device uint* out [[buffer(0)]],
 
 `tests/gpu_stages.rs`:
 ```rust
-use zerohunt::gpu::MetalContext;
+use nullforge::gpu::MetalContext;
 
 #[test]
 fn echo_kernel_doubles_thread_id() {
@@ -102,7 +102,7 @@ fn echo_kernel_doubles_thread_id() {
 - [ ] **Step 4: Run test to verify it fails**
 
 Run: `cargo test --test gpu_stages echo_kernel_doubles_thread_id`
-Expected: FAIL to compile — `zerohunt::gpu` / `MetalContext` not defined.
+Expected: FAIL to compile — `nullforge::gpu` / `MetalContext` not defined.
 
 - [ ] **Step 5: Implement `src/lib.rs` and `src/gpu/mod.rs`**
 
@@ -176,7 +176,7 @@ impl Default for MetalContext {
 
 ```rust
 fn main() {
-    println!("zerohunt-gpu: harness placeholder (see plan tasks)");
+    println!("nullforge-gpu: harness placeholder (see plan tasks)");
 }
 ```
 
@@ -533,13 +533,13 @@ use std::sync::Arc;
 use std::time::Instant;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use zerohunt::gpu::{MetalContext, Hit};
+use nullforge::gpu::{MetalContext, Hit};
 
 fn main() {
     let target: u32 = match env::args().nth(1) {
         None => 8,
         Some(a) => match a.trim().parse() { Ok(n) => n, Err(_) => {
-            eprintln!("Invalid leading-zero count: {a:?}\nUsage: zerohunt-gpu [max_zeros] (default 8)");
+            eprintln!("Invalid leading-zero count: {a:?}\nUsage: nullforge-gpu [max_zeros] (default 8)");
             std::process::exit(2);
         }}
     };
@@ -582,7 +582,7 @@ fn main() {
 
 - [ ] **Step 6: Build + smoke-run**
 
-Run: `cargo build --release --bin zerohunt-gpu && ./target/release/zerohunt-gpu 5`
+Run: `cargo build --release --bin nullforge-gpu && ./target/release/nullforge-gpu 5`
 Expected: prints threads/rate, finds ≥5-zero addresses, each verified; Ctrl-C stops cleanly.
 
 - [ ] **Step 7: Commit**

@@ -1,20 +1,22 @@
-# ZeroHunt
+# Nullforge
 
-ZeroHunt mines Ethereum vanity addresses with the maximum number of **leading
+Nullforge mines Ethereum vanity addresses with the maximum number of **leading
 zero nibbles** (e.g. `0x00000000…`). Such addresses are increasingly used by
 protocols to resist [address-poisoning](https://eips.ethereum.org/EIPS/eip-8117)
-attacks and to save calldata gas. ZeroHunt ships two miners:
+attacks and to save calldata gas. Nullforge ships two miners:
 
-- **`zerohunt`** — a multi-threaded **CPU** miner.
-- **`zerohunt-gpu`** — a **unified CPU + GPU** miner (Apple Metal) that runs both
+- **`nullforge`** — a multi-threaded **CPU** miner.
+- **`nullforge-gpu`** — a **unified CPU + GPU** miner (Apple Metal) that runs both
   engines in one process against a shared best-tracker.
 
 Results are displayed in **[ERC-8117](https://eips.ethereum.org/EIPS/eip-8117)**
 "compact anti-poisoning" notation (`0x0₈abcd…1234` / `0x0(8)abcd…1234`).
 
-> ⚠️ **This is a research/vanity tool. It generates real private keys and writes
-> them to `scanned_keys.txt`. Keep that file secret. Never fund an address whose
-> key was produced or logged by a tool you do not fully trust.**
+> ⚠️ **This is a research/vanity tool that generates real private keys.** By
+> default the key column of `scanned_keys.txt` is **encrypted to an age (X25519)
+> recipient** and the decryption secret stays offline — see
+> [Secure key output](#secure-key-output). Never fund an address whose key was
+> produced or logged by a tool you do not fully trust.
 
 ---
 
@@ -41,8 +43,8 @@ Results are displayed in **[ERC-8117](https://eips.ethereum.org/EIPS/eip-8117)**
 - **macOS** with an Apple **Metal** GPU (developed and tested on Apple Silicon,
   M1 Pro). The crate depends on the [`metal`](https://crates.io/crates/metal)
   crate, which links `Metal.framework`, so the project currently **builds on
-  macOS only**. The `zerohunt-gpu` miner needs a working Metal device; the
-  `zerohunt` CPU miner needs only the CPU (but still builds via the macOS
+  macOS only**. The `nullforge-gpu` miner needs a working Metal device; the
+  `nullforge` CPU miner needs only the CPU (but still builds via the macOS
   toolchain).
 - **Rust** (stable, 2021 edition) — install with [rustup](https://rustup.rs):
   ```bash
@@ -62,34 +64,79 @@ cd zerohunt-eip8117
 cargo build --release
 ```
 
-This produces two binaries:
+This produces four binaries under `target/release/`:
 
-- `target/release/zerohunt` — CPU miner
-- `target/release/zerohunt-gpu` — unified CPU + GPU miner
+- `nullforge` — CPU miner
+- `nullforge-gpu` — unified CPU + GPU miner
+- `nullforge-keygen` — one-time encrypted-output setup
+- `nullforge-decrypt` — offline key recovery
+
+---
+
+## Quickstart
+
+The complete happy path, top to bottom:
+
+```bash
+# 1. Build (see above) — produces the four binaries under target/release/.
+
+# 2. ONE-TIME SETUP (run on a trusted machine). Generates your age identity:
+#    the SECRET is printed to stdout — store it OFFLINE, it is the ONLY thing
+#    that can decrypt mined keys. The PUBLIC recipient is written to
+#    ./age-recipient.txt, which is all the miner needs.
+./target/release/nullforge-keygen > ~/nullforge-identity.txt   # keep this file OFFLINE
+
+# 3. MINE. Output is encrypted to that recipient by default. The argument is the
+#    target number of leading-zero nibbles (default 8; valid 1–40). Ctrl-C stops.
+./target/release/nullforge-gpu 8      # unified CPU + GPU (Apple Silicon)
+#    …or CPU-only:
+./target/release/nullforge 8
+
+# 4. RECOVER the mined key(s) OFFLINE, using your secret identity:
+./target/release/nullforge-decrypt --identity ~/nullforge-identity.txt scanned_keys.txt
+#    -> prints:  <address> <TAB> <leading_zeros> <TAB> <private_key_hex>
+```
+
+> **Without step 2 the miner fails closed** — it refuses to run rather than write
+> plaintext keys. For throwaway local testing only, skip the setup and pass
+> `--reveal` to write raw hex instead (insecure; it prints a warning).
 
 ---
 
 ## Usage
+
+> First-time? Do the one-time `nullforge-keygen` setup from the
+> [Quickstart](#quickstart) — the miner encrypts by default and **fails closed**
+> without a recipient.
 
 Both tools take **one optional argument: the target number of leading zero
 nibbles** (default `8`). The miner runs until it finds an address with at least
 that many leading zeros, or until you press **Ctrl-C**. Every improvement is
 printed and appended to `scanned_keys.txt` in the current directory.
 
+The target is validated to **1–40** nibbles (an EVM address has 40 hex nibbles,
+so 32 — and up to 40 — are accepted). Each additional zero is ~16× harder
+(≈`16^n` keys on average), so targets above ~10–12 are astronomically infeasible
+to brute-force: the miner prints a warning and will realistically run until
+Ctrl-C. The extreme-leading-zero addresses you see transacting on-chain (e.g.
+`0x0000…028Ae8`) are **not** found keys — they are unspendable mint/burn sinks
+that a token contract merely names in its `Transfer` events; no one holds their
+private key.
+
 ### Unified CPU + GPU miner (recommended on Apple Silicon)
 
 ```bash
 # via cargo
-cargo run --release --bin zerohunt-gpu -- 9
+cargo run --release --bin nullforge-gpu -- 9
 
 # or the built binary directly
-./target/release/zerohunt-gpu 9
+./target/release/nullforge-gpu 9
 ```
 
-Example run (`zerohunt-gpu 5`):
+Example run (`nullforge-gpu 5`):
 
 ```
-zerohunt-gpu: 8 CPU workers + GPU, finding an address with 5 leading zeros
+nullforge-gpu: 8 CPU workers + GPU, finding an address with 5 leading zeros
 New best [CPU] 1 leading zeros: 0x05e2965cf119765e0428a7936e85277f005ed52c
 New best [CPU] 2 leading zeros: 0x00a402cc0e433c0dc3bc136b7bfb359b79fa19ed
 New best [CPU] 3 leading zeros: 0x000f64871583825134171ea2bae8d719cc4bb61a
@@ -98,7 +145,7 @@ New best [CPU] 5 leading zeros: 0x0₅a82e…5e5c  (0x0(5)a82e…5e5c)
 Found wallet with the most leading zeros:
 Address (raw):      0x00000a82e1c4e5e17d4a162016fb79189cc85e5c
 Address (ERC-8117): 0x0₅a82e1c4e5e17d4a162016fb79189cc85e5c  (0x0(5)a82e1c4e5e17d4a162016fb79189cc85e5c)
-Private Key: fccabd00d04c5cbc60cb92dec9dfba6b28fda65abfd888a4081553e0ae241c71
+Private Key: [ENCRYPTED to age recipient in scanned_keys.txt; recover offline with `nullforge-decrypt`]
 ```
 
 While running, a status line prints every ~5 seconds:
@@ -110,13 +157,64 @@ CPU: 0.18 Mkeys/s | GPU: 0.09 Mkeys/s | total 0.27 Mkeys/s | best: 6
 ### CPU-only miner
 
 ```bash
-cargo run --release --bin zerohunt -- 9
+cargo run --release --bin nullforge -- 9
 # or
-./target/release/zerohunt 9
+./target/release/nullforge 9
 ```
 
 The CPU tool additionally tracks **consecutive repeating characters** after the
 leading zeros (e.g. `0x0000bbbb…`) as a secondary "interestingness" signal.
+
+### CREATE2 contract addresses (gas-optimized deploys)
+
+For a **contract** whose *deployed address* has leading zeros — to save calldata
+gas, worth it for a contract referenced in nearly every tx — you mine a
+**CREATE2 salt**, not an EOA key. This mode is **keccak-only** (no secp256k1), so
+it's far faster than the EOA miner, and the result is a **public salt**: nothing
+is encrypted.
+
+```bash
+nullforge-gpu 12 --create2 \
+  --deployer        0x<CREATE2 factory / deployer — 20 bytes> \
+  --init-code-hash  0x<keccak256(init code) of the contract — 32 bytes>
+```
+
+Each new best is printed and appended as `<total>\t<address>\t<zeros>\t<salt>`
+to `scanned_salts.txt`. Deploy the contract through your CREATE2 factory with the
+found salt and it lands on the vanity address:
+`address = keccak256(0xff ‖ deployer ‖ salt ‖ init_code_hash)[12:]`.
+
+Each extra leading-zero **byte** (2 nibbles) shaves ~12 gas per calldata
+reference. 12 nibbles (6 bytes) ≈ 2⁴⁸ salts — roughly a day on one modern GPU;
+8 nibbles (2³²) is minutes and the common cost/benefit sweet spot.
+
+---
+
+## CLI reference
+
+| Command | What it does |
+|---|---|
+| `nullforge [N] [--reveal]` | CPU miner. `N` = target leading-zero nibbles (default `8`, valid `1–40`). |
+| `nullforge-gpu [N] [--reveal]` | Unified CPU + GPU miner (Apple Metal). Same args. |
+| `nullforge-gpu [N] --create2 --deployer 0x.. --init-code-hash 0x..` | Mine a CREATE2 **salt** so a *contract* deploys to an N-leading-zero address (keccak-only; salt is public → plaintext `scanned_salts.txt`). |
+| `nullforge-keygen` | One-time setup: prints the SECRET age identity to **stdout**, writes the PUBLIC recipient to `age-recipient.txt`. |
+| `nullforge-decrypt -i <identity> [file]` | Offline recovery: decrypts the key column of `scanned_keys.txt` (default `file`) with your secret identity. |
+
+**Flags**
+
+- `--reveal` — write/print raw **plaintext** hex keys instead of encrypting.
+  Insecure; the only way plaintext is ever emitted, and it prints a warning.
+
+**Environment variables**
+
+| Variable | Effect |
+|---|---|
+| `NULLFORGE_AGE_RECIPIENT` | `age1…` recipient the miner encrypts to (takes precedence over `age-recipient.txt`). |
+| `NULLFORGE_AGE_IDENTITY_FILE` | Default secret-identity path for `nullforge-decrypt` (instead of `-i`). |
+
+Each extra leading zero is ~16× more work, so targets above ~10–12 nibbles are
+astronomically infeasible to brute-force — the miner prints a warning and runs
+until Ctrl-C.
 
 ---
 
@@ -134,15 +232,55 @@ leading zeros (e.g. `0x0000bbbb…`) as a secondary "interestingness" signal.
 ### `scanned_keys.txt` (log file, tab-separated)
 
 ```
-<total_keys_tried>	<address>	<leading_zeros>	<private_key_hex>
+<total_keys_tried>	<address>	<leading_zeros>	<key_column>
 ```
 
 The address column uses **ERC-8117 subscript, non-truncated** for ≥ 4 leading
 zeros (this is lossless — `0x0₈` + the remainder reconstructs the full address);
-raw hex below the threshold.
+raw hex below the threshold. The **key column** is, by default,
+`base64(age_encrypt(private_key))` — recover it with `nullforge-decrypt` (see
+[Secure key output](#secure-key-output)). Only with `--reveal` is it raw hex.
 
-> ⚠️ **`scanned_keys.txt` contains private keys in plaintext.** It is
-> `.gitignore`d so it is never committed, but treat the file itself as a secret.
+> ⚠️ **The address column is public; the key column is age ciphertext at rest.**
+> `scanned_keys.txt` is `.gitignore`d regardless. Under `--reveal` the key column
+> is PLAINTEXT — treat the whole file as a secret in that mode.
+
+---
+
+## Secure key output
+
+By default, every found private key is **encrypted to an age (X25519) recipient**
+before it is written — plaintext keys never touch disk or the console. The
+decryption secret is generated once and kept **offline**; the mining box only
+ever holds the public recipient, so a compromised box (or a leaked
+`scanned_keys.txt`) yields only ciphertext.
+
+**One-time setup (on a trusted machine):**
+
+```bash
+# Writes the PUBLIC recipient to age-recipient.txt (the miner reads this) and
+# prints the SECRET identity to stdout — save it OFFLINE (password manager /
+# hardware / paper), e.g. straight onto removable media:
+nullforge-keygen > /Volumes/OFFLINE/age-identity.txt
+```
+
+The miner then encrypts automatically — it resolves the recipient from
+`age-recipient.txt` in the working directory, or from `$NULLFORGE_AGE_RECIPIENT`.
+With **no** recipient configured it **fails closed** (refuses to run) rather than
+writing plaintext.
+
+**Recover keys later (on the offline machine that holds the secret):**
+
+```bash
+nullforge-decrypt --identity /Volumes/OFFLINE/age-identity.txt scanned_keys.txt
+# -> prints:  <address>	<leading_zeros>	<private_key_hex>
+```
+
+The encrypted column is standard age, so `age -d -i <identity> …` interoperates too.
+
+**Escape hatch (insecure):** pass `--reveal` to write/print raw hex keys instead
+(e.g. throwaway local testing). It is the *only* way plaintext keys are emitted,
+and it prints a warning.
 
 ---
 
@@ -203,10 +341,12 @@ it, so this tradeoff is documented rather than left implicit.
 
 Source layout:
 
-- `src/main.rs` — `zerohunt` CPU miner
-- `src/bin/gpu.rs` — `zerohunt-gpu` unified miner host loop + CLI
+- `src/main.rs` — `nullforge` CPU miner
+- `src/bin/gpu.rs` — `nullforge-gpu` unified miner host loop + CLI
 - `src/miner/` — shared state + `report_hit` funnel, CPU worker, GPU driver
 - `src/erc8117.rs` — ERC-8117 formatter
+- `src/keyenc.rs` — key-output encryption (age); `src/bin/keygen.rs` +
+  `src/bin/decrypt.rs` — offline identity setup + recovery
 - `src/gpu/` + `kernels/` — Metal compute host + kernels
 - `docs/specs/`, `docs/plans/` — design spec and implementation plan
 
@@ -232,20 +372,22 @@ Measured on an Apple M1 Pro (10 CPU cores, 16-core GPU), release build:
 | Engine | Throughput |
 |---|---|
 | CPU (all cores) | ~180,000 keys/s |
-| GPU (current kernel) | ~90,000 keys/s |
+| GPU (Metal) | ~25,000,000 keys/s |
 
-The GPU is currently **slower than the CPU** because `dispatch_mine` recompiles
-the Metal kernel on every batch, so the GPU spends most of its time compiling
-rather than mining. Caching the compiled pipeline is the top planned fix; deeper
-GPU speedups (a fixed-base comb table for `k·G` and a per-thread batched modular
-inverse) are specced in `docs/`. Expected effort for N leading zeros scales as
-16ᴺ, so each additional zero is ~16× more work.
+The GPU is now the **dominant engine** (~140× the CPU), after two host-side fixes:
+the `mine` compute pipeline is compiled **once** and reused (it was recompiled on
+every batch), and dispatch uses `dispatch_threads` with a full-width threadgroup
+instead of one thread per threadgroup (which idled ~32× of the GPU's SIMD width).
+Deeper GPU speedups (a fixed-base comb table for `k·G` and a per-thread batched
+modular inverse) are specced in `docs/`. Expected effort for N leading zeros
+scales as 16ᴺ, so each additional zero is ~16× more work.
 
 ---
 
 ## Roadmap
 
-- Cache the compiled Metal pipeline in `MetalContext` (biggest near-term GPU win).
+- ~~Cache the compiled Metal pipeline in `MetalContext`~~ · ~~fix threadgroup
+  occupancy (`dispatch_threads`)~~ — **done** (GPU ~0.09 → ~25 Mkeys/s).
 - Stage 2: fixed-base comb table for `k·G`.
 - Stage 3: per-thread batched modular inverse (Montgomery's trick).
 

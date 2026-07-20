@@ -1,4 +1,4 @@
-use zerohunt::gpu::MetalContext;
+use nullforge::gpu::MetalContext;
 
 #[test]
 fn echo_kernel_doubles_thread_id() {
@@ -15,11 +15,7 @@ fn echo_kernel_doubles_thread_id() {
 fn keccak_matches_host_reference() {
     use ethers::utils::keccak256;
     let ctx = MetalContext::new();
-    let inputs: Vec<Vec<u8>> = vec![
-        vec![],
-        b"abc".to_vec(),
-        (0u8..64).collect(),
-    ];
+    let inputs: Vec<Vec<u8>> = vec![vec![], b"abc".to_vec(), (0u8..64).collect()];
     let gpu = ctx.run_keccak_fixed64(&inputs);
     for (i, inp) in inputs.iter().enumerate() {
         assert_eq!(gpu[i], keccak256(inp), "keccak mismatch on input {i}");
@@ -109,7 +105,11 @@ fn host_field_reference_is_self_consistent() {
     let two = U256::from(2u32);
     // inv(2) = (p+1)/2 in closed form; validates modpow independently of mulmod.
     let inv2_closed = (p + U256::one()) >> 1;
-    assert_eq!(modpow(two, p - two, p), inv2_closed, "modpow(2,p-2) != (p+1)/2");
+    assert_eq!(
+        modpow(two, p - two, p),
+        inv2_closed,
+        "modpow(2,p-2) != (p+1)/2"
+    );
     // 2 * inv(2) == 1 (mod p): validates mulmod + modpow together.
     assert_eq!(mulmod(two, inv2_closed, p), U256::one(), "2*inv(2) != 1");
     // Fermat round-trip for a large operand.
@@ -133,7 +133,7 @@ fn field_ops_match_host_mod_p() {
     let big = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
     let cases: &[(&str, &str)] = &[
         ("2", "3"),
-        (p_minus_1, "5"),      // p-1, 5
+        (p_minus_1, "5"), // p-1, 5
         (big, "1234567890ABCDEF"),
         (p_minus_1, p_minus_1), // max operands: add-carry edge + a*a
         (p_minus_2, p_minus_2), // near p: a*a edge
@@ -317,7 +317,10 @@ fn pipeline_privkey_and_address_match_host() {
         let sk = SigningKey::from_bytes(priv_k.into()).expect("canonical key");
         let want = secret_key_to_address(&sk);
         assert_eq!(&addr[..], want.as_bytes(), "address mismatch idx {i}");
-        assert!(ctx.verify_hit(*priv_k, *addr), "verify_hit false for idx {i}");
+        assert!(
+            ctx.verify_hit(*priv_k, *addr),
+            "verify_hit false for idx {i}"
+        );
     }
 }
 
@@ -342,7 +345,10 @@ fn mine_finds_and_verifies_low_threshold() {
     let hits = ctx.dispatch_mine(&seeds, &base, 4096, 2); // >=2 leading zero nibbles
     assert!(!hits.is_empty(), "should find >=2-zero addresses");
     for h in &hits {
-        assert!(ctx.verify_hit(h.privkey, h.address), "hit failed host re-derivation");
+        assert!(
+            ctx.verify_hit(h.privkey, h.address),
+            "hit failed host re-derivation"
+        );
         assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
     }
 }
@@ -383,17 +389,22 @@ fn mine_incremental_finds_and_verifies_low_threshold() {
 /// tests in this file (runs on the Metal device present in CI/dev machines).
 #[test]
 fn gpu_driver_finds_and_reports_low_target() {
+    use nullforge::gpu::MetalContext;
+    use nullforge::miner::gpu_driver::{run_batches, N_THREADS};
+    use nullforge::miner::shared::MinerShared;
     use std::sync::Arc;
     use std::time::Instant;
-    use zerohunt::gpu::MetalContext;
-    use zerohunt::miner::gpu_driver::{run_batches, N_THREADS};
-    use zerohunt::miner::shared::MinerShared;
 
     let ctx = MetalContext::new();
 
     let file = tempfile::NamedTempFile::new().unwrap();
     // target 2 => the very first batch should surface >=2-zero hits fast.
-    let shared = Arc::new(MinerShared::new(2, file.reopen().unwrap(), Instant::now()));
+    let shared = Arc::new(MinerShared::new(
+        2,
+        file.reopen().unwrap(),
+        Instant::now(),
+        nullforge::keyenc::KeySink::RevealPlaintext,
+    ));
 
     // Deterministic distinct seeds (content is irrelevant to correctness).
     let mut seeds = vec![[0u8; 32]; N_THREADS];
@@ -409,6 +420,60 @@ fn gpu_driver_finds_and_reports_low_target() {
 
     use std::io::Read;
     let mut contents = String::new();
-    file.reopen().unwrap().read_to_string(&mut contents).unwrap();
+    file.reopen()
+        .unwrap()
+        .read_to_string(&mut contents)
+        .unwrap();
     assert!(!contents.trim().is_empty(), "file should have a hit line");
+}
+
+// ---------------------------------------------------------------------------
+// CREATE2 salt mining: keccak-only kernel, cross-checked against ethers'
+// canonical CREATE2 address derivation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create2_finds_and_verifies_low_threshold() {
+    use ethers::types::Address;
+    use ethers::utils::get_create2_address_from_hash;
+
+    let ctx = MetalContext::new();
+    let deployer: [u8; 20] = [0x11; 20];
+    let initcodehash: [u8; 32] = [0x22; 32];
+
+    let n = 256usize;
+    let base_salts: Vec<[u8; 32]> = (0..n)
+        .map(|i| {
+            let mut s = [0u8; 32];
+            s[0] = (i & 0xff) as u8;
+            s[1] = (i >> 8) as u8;
+            s[23] = 0x11;
+            s
+        })
+        .collect();
+    let base_counters: Vec<u64> = vec![0u64; n];
+
+    // >= 2 leading zero nibbles across 256*4096 candidates -> plenty of hits fast.
+    let hits = ctx.dispatch_create2(
+        &deployer,
+        &initcodehash,
+        &base_salts,
+        &base_counters,
+        4096,
+        2,
+    );
+    assert!(!hits.is_empty(), "should find >=2-zero CREATE2 addresses");
+
+    for h in &hits {
+        // Host re-derivation gate.
+        assert!(
+            ctx.verify_create2(&deployer, &initcodehash, &h.salt, &h.address),
+            "GPU CREATE2 hit failed host re-derivation"
+        );
+        // Independent cross-check against ethers' canonical CREATE2.
+        let want =
+            get_create2_address_from_hash(Address::from_slice(&deployer), h.salt, initcodehash);
+        assert_eq!(want.as_bytes(), h.address, "CREATE2 address != ethers");
+        assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
+    }
 }
