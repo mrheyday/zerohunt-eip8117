@@ -12,9 +12,11 @@ attacks and to save calldata gas. ZeroHunt ships two miners:
 Results are displayed in **[ERC-8117](https://eips.ethereum.org/EIPS/eip-8117)**
 "compact anti-poisoning" notation (`0x0₈abcd…1234` / `0x0(8)abcd…1234`).
 
-> ⚠️ **This is a research/vanity tool. It generates real private keys and writes
-> them to `scanned_keys.txt`. Keep that file secret. Never fund an address whose
-> key was produced or logged by a tool you do not fully trust.**
+> ⚠️ **This is a research/vanity tool that generates real private keys.** By
+> default the key column of `scanned_keys.txt` is **encrypted to an age (X25519)
+> recipient** and the decryption secret stays offline — see
+> [Secure key output](#secure-key-output). Never fund an address whose key was
+> produced or logged by a tool you do not fully trust.
 
 ---
 
@@ -98,7 +100,7 @@ New best [CPU] 5 leading zeros: 0x0₅a82e…5e5c  (0x0(5)a82e…5e5c)
 Found wallet with the most leading zeros:
 Address (raw):      0x00000a82e1c4e5e17d4a162016fb79189cc85e5c
 Address (ERC-8117): 0x0₅a82e1c4e5e17d4a162016fb79189cc85e5c  (0x0(5)a82e1c4e5e17d4a162016fb79189cc85e5c)
-Private Key: fccabd00d04c5cbc60cb92dec9dfba6b28fda65abfd888a4081553e0ae241c71
+Private Key: [ENCRYPTED to age recipient in scanned_keys.txt; recover offline with `zerohunt-decrypt`]
 ```
 
 While running, a status line prints every ~5 seconds:
@@ -134,15 +136,55 @@ leading zeros (e.g. `0x0000bbbb…`) as a secondary "interestingness" signal.
 ### `scanned_keys.txt` (log file, tab-separated)
 
 ```
-<total_keys_tried>	<address>	<leading_zeros>	<private_key_hex>
+<total_keys_tried>	<address>	<leading_zeros>	<key_column>
 ```
 
 The address column uses **ERC-8117 subscript, non-truncated** for ≥ 4 leading
 zeros (this is lossless — `0x0₈` + the remainder reconstructs the full address);
-raw hex below the threshold.
+raw hex below the threshold. The **key column** is, by default,
+`base64(age_encrypt(private_key))` — recover it with `zerohunt-decrypt` (see
+[Secure key output](#secure-key-output)). Only with `--reveal` is it raw hex.
 
-> ⚠️ **`scanned_keys.txt` contains private keys in plaintext.** It is
-> `.gitignore`d so it is never committed, but treat the file itself as a secret.
+> ⚠️ **The address column is public; the key column is age ciphertext at rest.**
+> `scanned_keys.txt` is `.gitignore`d regardless. Under `--reveal` the key column
+> is PLAINTEXT — treat the whole file as a secret in that mode.
+
+---
+
+## Secure key output
+
+By default, every found private key is **encrypted to an age (X25519) recipient**
+before it is written — plaintext keys never touch disk or the console. The
+decryption secret is generated once and kept **offline**; the mining box only
+ever holds the public recipient, so a compromised box (or a leaked
+`scanned_keys.txt`) yields only ciphertext.
+
+**One-time setup (on a trusted machine):**
+
+```bash
+# Writes the PUBLIC recipient to age-recipient.txt (the miner reads this) and
+# prints the SECRET identity to stdout — save it OFFLINE (password manager /
+# hardware / paper), e.g. straight onto removable media:
+zerohunt-keygen > /Volumes/OFFLINE/age-identity.txt
+```
+
+The miner then encrypts automatically — it resolves the recipient from
+`age-recipient.txt` in the working directory, or from `$ZEROHUNT_AGE_RECIPIENT`.
+With **no** recipient configured it **fails closed** (refuses to run) rather than
+writing plaintext.
+
+**Recover keys later (on the offline machine that holds the secret):**
+
+```bash
+zerohunt-decrypt --identity /Volumes/OFFLINE/age-identity.txt scanned_keys.txt
+# -> prints:  <address>	<leading_zeros>	<private_key_hex>
+```
+
+The encrypted column is standard age, so `age -d -i <identity> …` interoperates too.
+
+**Escape hatch (insecure):** pass `--reveal` to write/print raw hex keys instead
+(e.g. throwaway local testing). It is the *only* way plaintext keys are emitted,
+and it prints a warning.
 
 ---
 
@@ -188,6 +230,8 @@ Source layout:
 - `src/bin/gpu.rs` — `zerohunt-gpu` unified miner host loop + CLI
 - `src/miner/` — shared state + `report_hit` funnel, CPU worker, GPU driver
 - `src/erc8117.rs` — ERC-8117 formatter
+- `src/keyenc.rs` — key-output encryption (age); `src/bin/keygen.rs` +
+  `src/bin/decrypt.rs` — offline identity setup + recovery
 - `src/gpu/` + `kernels/` — Metal compute host + kernels
 - `docs/specs/`, `docs/plans/` — design spec and implementation plan
 

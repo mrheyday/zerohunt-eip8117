@@ -5,9 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use ethers::utils::hex;
-
 use crate::erc8117;
+use crate::keyenc::{self, KeySink};
 
 /// Which engine found a candidate (for attribution + rate accounting).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +39,9 @@ pub struct MinerShared {
     best_zeros: AtomicUsize,
     best: Mutex<Option<FoundKey>>,
     file: Mutex<File>,
+    /// How found private keys are written: encrypted to an age recipient
+    /// (secure default) or raw hex (explicit `--reveal`, insecure).
+    key_sink: KeySink,
     cpu_keys: AtomicU64,
     gpu_keys: AtomicU64,
     stop: AtomicBool,
@@ -48,12 +50,13 @@ pub struct MinerShared {
 }
 
 impl MinerShared {
-    pub fn new(target: usize, file: File, start: Instant) -> Self {
+    pub fn new(target: usize, file: File, start: Instant, key_sink: KeySink) -> Self {
         Self {
             target,
             best_zeros: AtomicUsize::new(0),
             best: Mutex::new(None),
             file: Mutex::new(file),
+            key_sink,
             cpu_keys: AtomicU64::new(0),
             gpu_keys: AtomicU64::new(0),
             stop: AtomicBool::new(false),
@@ -121,10 +124,20 @@ impl MinerShared {
 
         let total = self.cpu_keys() + self.gpu_keys();
         let notated = erc8117::format_address(address_str, erc8117::Mode::Subscript, false);
-        let privhex = hex::encode(privkey);
-        {
-            let mut file = self.file.lock().unwrap();
-            let _ = writeln!(file, "{}\t{}\t{}\t{}", total, notated, zeros, privhex);
+        // Encrypt the key to the age recipient before it touches disk. On a
+        // (rare) encode failure, write NO line rather than fall back to
+        // plaintext — fail closed.
+        match keyenc::encode_key_field(&self.key_sink, &privkey) {
+            Ok(key_field) => {
+                let mut file = self.file.lock().unwrap();
+                let _ = writeln!(file, "{}\t{}\t{}\t{}", total, notated, zeros, key_field);
+            }
+            Err(e) => {
+                eprintln!(
+                    "ERROR: could not encode key for {notated} ({zeros} zeros): {e} \
+                     -- line NOT written (no plaintext fallback)"
+                );
+            }
         }
         println!(
             "New best [{}] {} leading zeros: {}",
@@ -151,7 +164,12 @@ mod tests {
 
     fn ctx(target: usize) -> (MinerShared, tempfile::NamedTempFile) {
         let f = tempfile::NamedTempFile::new().unwrap();
-        let shared = MinerShared::new(target, f.reopen().unwrap(), Instant::now());
+        let shared = MinerShared::new(
+            target,
+            f.reopen().unwrap(),
+            Instant::now(),
+            crate::keyenc::KeySink::RevealPlaintext,
+        );
         (shared, f)
     }
 
@@ -170,7 +188,10 @@ mod tests {
         assert_eq!(shared.best_zeros(), 8);
         // file column is subscript non-truncated (0x0₈ + full remainder)
         let line = read_file(&f);
-        assert!(line.contains("0x0\u{2088}abcd0123456789012345678901234567"), "got: {line}");
+        assert!(
+            line.contains("0x0\u{2088}abcd0123456789012345678901234567"),
+            "got: {line}"
+        );
         assert!(line.contains("\t8\t"), "zeros column, got: {line}");
     }
 
@@ -190,16 +211,31 @@ mod tests {
     #[test]
     fn stop_trips_exactly_at_target() {
         let (shared, _f) = ctx(6);
-        assert!(shared.report_hit(Engine::Gpu, [0u8; 32], "0x00000abc0123456789012345678901234567890a", 5));
+        assert!(shared.report_hit(
+            Engine::Gpu,
+            [0u8; 32],
+            "0x00000abc0123456789012345678901234567890a",
+            5
+        ));
         assert!(!shared.should_stop(), "5 < target 6");
-        assert!(shared.report_hit(Engine::Gpu, [0u8; 32], "0x000000abc123456789012345678901234567890a", 6));
+        assert!(shared.report_hit(
+            Engine::Gpu,
+            [0u8; 32],
+            "0x000000abc123456789012345678901234567890a",
+            6
+        ));
         assert!(shared.should_stop(), "6 >= target 6");
     }
 
     #[test]
     fn take_best_returns_latest() {
         let (shared, _f) = ctx(8);
-        shared.report_hit(Engine::Cpu, [7u8; 32], "0x0000abc0123456789012345678901234567890ab", 4);
+        shared.report_hit(
+            Engine::Cpu,
+            [7u8; 32],
+            "0x0000abc0123456789012345678901234567890ab",
+            4,
+        );
         let best = shared.take_best().unwrap();
         assert_eq!(best.zeros, 4);
         assert_eq!(best.privkey, [7u8; 32]);

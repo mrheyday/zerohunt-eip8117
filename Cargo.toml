@@ -15,6 +15,18 @@ path = "src/main.rs"
 name = "zerohunt-gpu"
 path = "src/bin/gpu.rs"
 
+# Offline setup: generate the age identity (you keep the secret offline, the
+# miner only ever sees the public recipient).
+[[bin]]
+name = "zerohunt-keygen"
+path = "src/bin/keygen.rs"
+
+# Offline recovery: decrypt the age-encrypted key column of scanned_keys.txt
+# using the secret identity (run on a trusted/offline machine).
+[[bin]]
+name = "zerohunt-decrypt"
+path = "src/bin/decrypt.rs"
+
 [dependencies]
 # Pinned to 0.8 to match k256 0.13 (via ethers 2.0.14), which bounds
 # `SigningKey::random` on rand_core 0.6 traits. rand 0.9/0.10 use rand_core
@@ -24,6 +36,14 @@ ethers = { version = "2.0.14", default-features = false, features = ["ledger"] }
 tokio = { version = "1.41.0", default-features = false, features = ["rt", "rt-multi-thread", "signal", "macros", "time"] }
 num_cpus = "1.16.0"
 metal = "0.33.0"
+# Key-output encryption: encrypt each found private key to an age (X25519)
+# recipient so plaintext keys never touch disk/console. `age` is audited and
+# format-stable (offline-decryptable with the `age` CLI too). `zeroize` wipes
+# transient plaintext key bytes; `base64` packs the binary ciphertext into one
+# TSV column. Vet on lockfile change (supply-chain caution).
+age = "0.12"
+zeroize = "1"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

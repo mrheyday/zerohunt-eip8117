@@ -1,16 +1,19 @@
-use std::env;
+use ethers::core::k256::ecdsa::SigningKey;
 use ethers::signers::{Signer, Wallet};
 use ethers::utils::{hex, secret_key_to_address};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use tokio::task;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use ethers::core::k256::ecdsa::SigningKey;
+use tokio::task;
 use zerohunt::erc8117;
+use zerohunt::keyenc;
+use zeroize::Zeroize;
 
 /// Iterations each worker accumulates before flushing to the shared
 /// generated-counter atomic (reduces cross-thread cache-line contention).
@@ -20,20 +23,44 @@ const COUNTER_FLUSH: usize = 4096;
 async fn main() {
     // First CLI arg is the target leading-zero count; defaults to 8 when omitted.
     // On a non-numeric arg, exit cleanly with usage instead of panicking.
-    let max_zeros: usize = match env::args().nth(1) {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let reveal = args.iter().any(|a| a == "--reveal");
+    let max_zeros: usize = match args.iter().find(|a| !a.starts_with("--")) {
         None => 8,
         Some(arg) => match arg.trim().parse() {
             Ok(n) => n,
             Err(_) => {
                 eprintln!(
-                    "Invalid leading-zero count: {arg:?}\nUsage: zerohunt [max_zeros]   (positive integer, default 8)"
+                    "Invalid leading-zero count: {arg:?}\nUsage: zerohunt [max_zeros] [--reveal]   (positive integer, default 8)"
                 );
                 std::process::exit(2);
             }
         },
     };
+
+    // Resolve how found keys are written. Fail closed if no age recipient is
+    // configured and --reveal was not passed. Shared (read-only) across workers.
+    let key_sink = Arc::new(match keyenc::resolve_sink(reveal) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(2);
+        }
+    });
+    if reveal {
+        eprintln!(
+            "WARNING: --reveal set -> writing PLAINTEXT private keys to scanned_keys.txt (INSECURE)."
+        );
+    } else {
+        println!(
+            "Key output: ENCRYPTED to age recipient (scanned_keys.txt key column is ciphertext)."
+        );
+    }
     let num_threads = num_cpus::get();
-    println!("Number of threads: {}\nfinding first wallet with {} leading zeros", num_threads, max_zeros);
+    println!(
+        "Number of threads: {}\nfinding first wallet with {} leading zeros",
+        num_threads, max_zeros
+    );
     let max_zero_count = Arc::new(AtomicUsize::new(0));
     let max_order_chars = Arc::new(AtomicUsize::new(0));
     let best_wallet = Arc::new(Mutex::new(None));
@@ -57,6 +84,7 @@ async fn main() {
         OpenOptions::new()
             .create(true)
             .append(true)
+            .mode(0o600)
             .open("scanned_keys.txt")
             .expect("Unable to open file"),
     ));
@@ -68,6 +96,7 @@ async fn main() {
         let total_generated = Arc::clone(&total_generated);
         let stop_signal = Arc::clone(&stop_signal);
         let file = Arc::clone(&file);
+        let key_sink = Arc::clone(&key_sink);
 
         let handle = task::spawn_blocking(move || {
             // Per-thread CSPRNG: seed ONCE from full OS entropy (the profanity-safe
@@ -131,7 +160,11 @@ async fn main() {
                     .skip(zero_count + 2)
                     .fold((None, 0, 0), |(prev_char, max_count, current_count), c| {
                         if Some(c) == prev_char {
-                            (prev_char, max_count.max(current_count + 1), current_count + 1)
+                            (
+                                prev_char,
+                                max_count.max(current_count + 1),
+                                current_count + 1,
+                            )
                         } else {
                             (Some(c), max_count.max(current_count), 1)
                         }
@@ -150,7 +183,7 @@ async fn main() {
                 }
 
                 let wallet = Wallet::new_with_signer(signer, address, 1);
-                let private_key = hex::encode(wallet.signer().to_bytes());
+                let mut sk_bytes: [u8; 32] = wallet.signer().to_bytes().into();
 
                 // Flush the local counter before the (rare) report so the logged and
                 // printed running total is current.
@@ -159,20 +192,34 @@ async fn main() {
                 let generated_total = total_generated.load(Ordering::Relaxed);
 
                 {
-                    let mut file = file.lock().unwrap();
                     // ERC-8117 subscript form, NON-truncated -> lossless and
                     // reversible (0x0<sub-n> + full remainder reconstructs the
                     // address), so this column stays machine-recoverable on its
                     // own. Sub-threshold hits (n < 4) pass through as raw hex.
                     let address_notated =
                         erc8117::format_address(&address_str, erc8117::Mode::Subscript, false);
-                    writeln!(
-                        file,
-                        "{}\t{}\t{}\t{}",
-                        generated_total, address_notated, zero_count, private_key
-                    )
-                    .expect("Unable to write data to file");
+                    // Encrypt the key to the age recipient before it touches disk.
+                    // On a (rare) encode failure, write NO line rather than fall
+                    // back to plaintext.
+                    match keyenc::encode_key_field(key_sink.as_ref(), &sk_bytes) {
+                        Ok(key_field) => {
+                            let mut file = file.lock().unwrap();
+                            writeln!(
+                                file,
+                                "{}\t{}\t{}\t{}",
+                                generated_total, address_notated, zero_count, key_field
+                            )
+                            .expect("Unable to write data to file");
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "ERROR: could not encode key for {address_notated} \
+                                 ({zero_count} zeros): {e} -- line NOT written (no plaintext fallback)"
+                            );
+                        }
+                    }
                 }
+                sk_bytes.zeroize();
 
                 {
                     let mut best_wallet_lock = best_wallet.lock().unwrap();
@@ -183,7 +230,9 @@ async fn main() {
                 // high-entropy suffix per the anti-poisoning intent.
                 println!(
                     "New best address with {} leading zeros and {} repeating characters: {}",
-                    zero_count, chars_in_order, erc8117::format_both(&address_str, true)
+                    zero_count,
+                    chars_in_order,
+                    erc8117::format_both(&address_str, true)
                 );
 
                 if zero_count >= max_zeros {
@@ -200,7 +249,7 @@ async fn main() {
 
     let rate_handle = {
         let total_generated = Arc::clone(&total_generated);
-        let start_time = start_time.clone();
+        // `Instant` is `Copy`; the `async move` block below captures a copy.
 
         task::spawn(async move {
             loop {
@@ -227,8 +276,17 @@ async fn main() {
         // Raw hex for copy/paste + the ERC-8117 forms (non-truncated -> the full
         // address is preserved, just with the leading-zero run compacted).
         println!("Address (raw):      {}", addr_str);
-        println!("Address (ERC-8117): {}", erc8117::format_both(&addr_str, false));
-        println!("Private Key: {}", hex::encode(wallet.signer().to_bytes()));
+        println!(
+            "Address (ERC-8117): {}",
+            erc8117::format_both(&addr_str, false)
+        );
+        if reveal {
+            println!("Private Key: {}", hex::encode(wallet.signer().to_bytes()));
+        } else {
+            println!(
+                "Private Key: [ENCRYPTED to age recipient in scanned_keys.txt; recover offline with `zerohunt-decrypt`]"
+            );
+        }
     } else {
         println!("No wallet found.");
     }

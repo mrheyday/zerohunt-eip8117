@@ -4,6 +4,7 @@
 //! notation. Stops at `target_zeros` (default 8) or Ctrl-C.
 use std::env;
 use std::fs::OpenOptions;
+use std::os::unix::fs::OpenOptionsExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,19 +25,40 @@ const UTILIZATION: f64 = 0.80;
 
 #[tokio::main]
 async fn main() {
-    // CLI: `zerohunt-gpu [target_zeros]`, default 8 (mirrors the CPU tool).
-    let target: usize = match env::args().nth(1) {
+    // CLI: `zerohunt-gpu [target_zeros] [--reveal]`, default 8 (mirrors the CPU tool).
+    let args: Vec<String> = env::args().skip(1).collect();
+    let reveal = args.iter().any(|a| a == "--reveal");
+    let target: usize = match args.iter().find(|a| !a.starts_with("--")) {
         None => 8,
         Some(arg) => match arg.trim().parse() {
             Ok(n) => n,
             Err(_) => {
                 eprintln!(
-                    "Invalid leading-zero count: {arg:?}\nUsage: zerohunt-gpu [target_zeros]   (positive integer, default 8)"
+                    "Invalid leading-zero count: {arg:?}\nUsage: zerohunt-gpu [target_zeros] [--reveal]   (positive integer, default 8)"
                 );
                 std::process::exit(2);
             }
         },
     };
+
+    // Resolve how found keys are written. Fail closed if no age recipient is
+    // configured and --reveal was not passed.
+    let key_sink = match zerohunt::keyenc::resolve_sink(reveal) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(2);
+        }
+    };
+    if reveal {
+        eprintln!(
+            "WARNING: --reveal set -> writing PLAINTEXT private keys to scanned_keys.txt (INSECURE)."
+        );
+    } else {
+        println!(
+            "Key output: ENCRYPTED to age recipient (scanned_keys.txt key column is ciphertext)."
+        );
+    }
 
     let cpu_workers = ((num_cpus::get() as f64) * UTILIZATION).round().max(1.0) as usize;
     println!(
@@ -46,11 +68,12 @@ async fn main() {
     let file = OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
         .open("scanned_keys.txt")
         .expect("Unable to open scanned_keys.txt");
 
     let start = Instant::now();
-    let shared = Arc::new(MinerShared::new(target, file, start));
+    let shared = Arc::new(MinerShared::new(target, file, start, key_sink));
 
     // Build the GPU context up front so a missing device fails fast and clearly.
     let ctx = MetalContext::new();
@@ -123,7 +146,13 @@ async fn main() {
                 "Address (ERC-8117): {}",
                 erc8117::format_both(&best.address_str, false)
             );
-            println!("Private Key: {}", hex::encode(best.privkey));
+            if reveal {
+                println!("Private Key: {}", hex::encode(best.privkey));
+            } else {
+                println!(
+                    "Private Key: [ENCRYPTED to age recipient in scanned_keys.txt; recover offline with `zerohunt-decrypt`]"
+                );
+            }
         }
         None => println!("No wallet found."),
     }
