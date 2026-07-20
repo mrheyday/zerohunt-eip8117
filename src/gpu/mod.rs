@@ -402,7 +402,18 @@ impl MetalContext {
         enc.set_buffer(3, Some(&threshold_buf), 0);
         enc.set_buffer(4, Some(&hit_count_buf), 0);
         enc.set_buffer(5, Some(&hits_buf), 0);
-        enc.dispatch_thread_groups(MTLSize::new(n as u64, 1, 1), MTLSize::new(1, 1, 1));
+        // Threadgroup sizing per Apple's compute guidance ("Calculating
+        // threadgroup and grid sizes"): a 1-thread threadgroup underuses the
+        // GPU's SIMD width (~32 lanes idle out of every 32). Use dispatch_threads
+        // (non-uniform threadgroups; macOS 10.13+/Apple Silicon) with the widest
+        // threadgroup the pipeline permits, capped at the grid size. Per Apple,
+        // dispatch_threads needs no in-kernel bounds check — gid stays in [0, n).
+        let tg = self
+            .mine_pipeline
+            .max_total_threads_per_threadgroup()
+            .min(n as u64)
+            .max(1);
+        enc.dispatch_threads(MTLSize::new(n as u64, 1, 1), MTLSize::new(tg, 1, 1));
         enc.end_encoding();
         cmd.commit();
         cmd.wait_until_completed();
