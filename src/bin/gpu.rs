@@ -41,6 +41,18 @@ async fn main() {
         },
     };
 
+    // Validate the target range (1..=40 nibbles) and warn on infeasible targets.
+    let target = match zerohunt::target::validate_target(target) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(2);
+        }
+    };
+    if let Some(note) = zerohunt::target::feasibility_note(target) {
+        eprintln!("{note}");
+    }
+
     // Resolve how found keys are written. Fail closed if no age recipient is
     // configured and --reveal was not passed.
     let key_sink = match zerohunt::keyenc::resolve_sink(reveal) {

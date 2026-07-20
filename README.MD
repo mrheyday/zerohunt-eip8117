@@ -78,6 +78,15 @@ nibbles** (default `8`). The miner runs until it finds an address with at least
 that many leading zeros, or until you press **Ctrl-C**. Every improvement is
 printed and appended to `scanned_keys.txt` in the current directory.
 
+The target is validated to **1–40** nibbles (an EVM address has 40 hex nibbles,
+so 32 — and up to 40 — are accepted). Each additional zero is ~16× harder
+(≈`16^n` keys on average), so targets above ~10–12 are astronomically infeasible
+to brute-force: the miner prints a warning and will realistically run until
+Ctrl-C. The extreme-leading-zero addresses you see transacting on-chain (e.g.
+`0x0000…028Ae8`) are **not** found keys — they are unspendable mint/burn sinks
+that a token contract merely names in its `Transfer` events; no one holds their
+private key.
+
 ### Unified CPU + GPU miner (recommended on Apple Silicon)
 
 ```bash

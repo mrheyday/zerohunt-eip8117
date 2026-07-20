@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::task;
 use zerohunt::erc8117;
 use zerohunt::keyenc;
+use zerohunt::target;
 use zeroize::Zeroize;
 
 /// Iterations each worker accumulates before flushing to the shared
@@ -37,6 +38,18 @@ async fn main() {
             }
         },
     };
+
+    // Validate the target range (1..=40 nibbles) and warn on infeasible targets.
+    let max_zeros = match target::validate_target(max_zeros) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(2);
+        }
+    };
+    if let Some(note) = target::feasibility_note(max_zeros) {
+        eprintln!("{note}");
+    }
 
     // Resolve how found keys are written. Fail closed if no age recipient is
     // configured and --reveal was not passed. Shared (read-only) across workers.
