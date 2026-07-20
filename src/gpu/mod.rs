@@ -13,6 +13,10 @@ pub struct MetalContext {
     /// The `mine_create2` pipeline (keccak-only), compiled once and reused by
     /// every `dispatch_create2` batch. CREATE2 salt mining needs no secp256k1.
     create2_pipeline: ComputePipelineState,
+    /// The `mine_create3` pipeline (keccak-only), compiled once and reused by
+    /// every `dispatch_create3` batch. CREATE3 mines a salt for an init-code-
+    /// independent deployed address (proxy CREATE2 -> proxy CREATE at nonce 1).
+    create3_pipeline: ComputePipelineState,
 }
 
 /// A verified-candidate mining hit: a private key whose derived Ethereum
@@ -36,6 +40,45 @@ pub struct Create2Hit {
     pub zeros: u8,
 }
 
+/// A CREATE3 vanity-salt hit: a salt whose CREATE3-deployed contract address
+/// (proxy CREATE2 -> proxy CREATE at nonce 1, from a fixed factory + proxy-init
+/// hash) has `zeros` leading zero nibbles. Callers MUST re-verify via
+/// `MetalContext::verify_create3` before trusting `address`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Create3Hit {
+    pub salt: [u8; 32],
+    pub address: [u8; 20],
+    pub zeros: u8,
+}
+
+/// Pure host reference for a CREATE3 deployed address:
+/// `keccak256(0xd6 0x94 ‖ keccak256(0xff ‖ factory ‖ salt ‖ proxy_hash)[12:] ‖ 0x01)[12:]`.
+/// Init-code-independent — depends only on `(factory, salt)` for a given factory
+/// proxy (`proxy_hash`). Backs `verify_create3`; unit-testable without a GPU.
+pub fn create3_deployed_address(
+    factory: &[u8; 20],
+    proxy_hash: &[u8; 32],
+    salt: &[u8; 32],
+) -> [u8; 20] {
+    use ethers::utils::keccak256;
+    // hop 1: CREATE2 of the fixed proxy.
+    let mut p1 = Vec::with_capacity(85);
+    p1.push(0xff);
+    p1.extend_from_slice(factory);
+    p1.extend_from_slice(salt);
+    p1.extend_from_slice(proxy_hash);
+    let proxy = &keccak256(&p1)[12..32];
+    // hop 2: the proxy's CREATE at nonce 1 -> rlp([proxy, 0x01]) = 0xd6 0x94 ‖ proxy ‖ 0x01.
+    let mut p2 = Vec::with_capacity(23);
+    p2.push(0xd6);
+    p2.push(0x94);
+    p2.extend_from_slice(proxy);
+    p2.push(0x01);
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&keccak256(&p2)[12..32]);
+    out
+}
+
 /// Must match `HIT_STRIDE` in `kernels/miner.metal`.
 const MINE_HIT_STRIDE: usize = 64;
 /// Must match `MAX_HITS` in `kernels/miner.metal`.
@@ -47,11 +90,13 @@ impl MetalContext {
         let queue = device.new_command_queue();
         let mine_pipeline = Self::build_mine_pipeline(&device);
         let create2_pipeline = Self::build_create2_pipeline(&device);
+        let create3_pipeline = Self::build_create3_pipeline(&device);
         Self {
             device,
             queue,
             mine_pipeline,
             create2_pipeline,
+            create3_pipeline,
         }
     }
 
@@ -71,6 +116,24 @@ impl MetalContext {
         device
             .new_compute_pipeline_state_with_function(&func)
             .expect("create2 pipeline")
+    }
+
+    /// Compile the CREATE3 MSL (keccak + create3, no secp256k1) and build the
+    /// `mine_create3` pipeline. Called once from `new()`, reused by every
+    /// `dispatch_create3` call.
+    fn build_create3_pipeline(device: &Device) -> ComputePipelineState {
+        let keccak_src = include_str!("../../kernels/keccak.metal");
+        let create3_src = include_str!("../../kernels/create3.metal");
+        let src = format!("{keccak_src}\n{create3_src}");
+        let lib = device
+            .new_library_with_source(&src, &CompileOptions::new())
+            .expect("create3 kernel compile failed");
+        let func = lib
+            .get_function("mine_create3", None)
+            .expect("mine_create3 entry not found");
+        device
+            .new_compute_pipeline_state_with_function(&func)
+            .expect("create3 pipeline")
     }
 
     /// Assemble the concatenated miner MSL (keccak+field+ec+miner) and build the
@@ -859,6 +922,139 @@ impl MetalContext {
         preimage.extend_from_slice(salt);
         preimage.extend_from_slice(initcodehash);
         &keccak256(&preimage)[12..32] == address
+    }
+
+    /// Search `iters` salts per thread via `kernels/create3.metal`'s
+    /// `mine_create3` kernel: for a fixed `factory` (20 bytes) and `proxy_hash`
+    /// (32 bytes, the factory's proxy-init-code hash), return every CREATE3
+    /// deployed address with `>= threshold` leading-zero nibbles (bounded to 1024
+    /// hits/call). Each thread's salt is `base_salts[gid]` with its low 8 bytes
+    /// replaced by `base_counters[gid] + it`.
+    ///
+    /// SECURITY: every returned `Create3Hit` is a GPU candidate; callers MUST
+    /// re-verify with `verify_create3` before trusting `address`.
+    pub fn dispatch_create3(
+        &self,
+        factory: &[u8; 20],
+        proxy_hash: &[u8; 32],
+        base_salts: &[[u8; 32]],
+        base_counters: &[u64],
+        iters: u32,
+        threshold: u32,
+    ) -> Vec<Create3Hit> {
+        assert_eq!(
+            base_salts.len(),
+            base_counters.len(),
+            "base_salts/base_counters length mismatch"
+        );
+        let n = base_salts.len();
+
+        let mut salt_bytes = vec![0u8; n * 32];
+        for (i, s) in base_salts.iter().enumerate() {
+            salt_bytes[i * 32..i * 32 + 32].copy_from_slice(s);
+        }
+
+        let factory_buf = self.device.new_buffer_with_data(
+            factory.as_ptr() as *const std::ffi::c_void,
+            20,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let ph_buf = self.device.new_buffer_with_data(
+            proxy_hash.as_ptr() as *const std::ffi::c_void,
+            32,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let salts_buf = self.device.new_buffer_with_data(
+            salt_bytes.as_ptr() as *const std::ffi::c_void,
+            salt_bytes.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let counters_buf = self.device.new_buffer_with_data(
+            base_counters.as_ptr() as *const std::ffi::c_void,
+            std::mem::size_of_val(base_counters) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let iters_buf = self.device.new_buffer_with_data(
+            &iters as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let threshold_buf = self.device.new_buffer_with_data(
+            &threshold as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let hit_count_buf = self.device.new_buffer(
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        unsafe {
+            std::ptr::write_bytes(
+                hit_count_buf.contents() as *mut u8,
+                0,
+                std::mem::size_of::<u32>(),
+            );
+        }
+        let hits_bytes = MINE_MAX_HITS * MINE_HIT_STRIDE;
+        let hits_buf = self
+            .device
+            .new_buffer(hits_bytes as u64, MTLResourceOptions::StorageModeShared);
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&self.create3_pipeline);
+        enc.set_buffer(0, Some(&factory_buf), 0);
+        enc.set_buffer(1, Some(&ph_buf), 0);
+        enc.set_buffer(2, Some(&salts_buf), 0);
+        enc.set_buffer(3, Some(&counters_buf), 0);
+        enc.set_buffer(4, Some(&iters_buf), 0);
+        enc.set_buffer(5, Some(&threshold_buf), 0);
+        enc.set_buffer(6, Some(&hit_count_buf), 0);
+        enc.set_buffer(7, Some(&hits_buf), 0);
+        // Same threadgroup-occupancy sizing as dispatch_create2.
+        let tg = self
+            .create3_pipeline
+            .max_total_threads_per_threadgroup()
+            .min(n as u64)
+            .max(1);
+        enc.dispatch_threads(MTLSize::new(n as u64, 1, 1), MTLSize::new(tg, 1, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let found = unsafe { *(hit_count_buf.contents() as *const u32) } as usize;
+        let count = found.min(MINE_MAX_HITS);
+        let ptr = hits_buf.contents() as *const u8;
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, hits_bytes) };
+
+        (0..count)
+            .map(|i| {
+                let rec = i * MINE_HIT_STRIDE;
+                let mut salt = [0u8; 32];
+                salt.copy_from_slice(&bytes[rec..rec + 32]);
+                let mut address = [0u8; 20];
+                address.copy_from_slice(&bytes[rec + 32..rec + 52]);
+                let zeros = bytes[rec + 52];
+                Create3Hit {
+                    salt,
+                    address,
+                    zeros,
+                }
+            })
+            .collect()
+    }
+
+    /// Host-side re-derivation gate for a CREATE3 hit: recompute the deployed
+    /// address via `create3_deployed_address` and compare it to `address`.
+    /// Returns `false` on any mismatch (a GPU bug must never emit a bad salt).
+    pub fn verify_create3(
+        &self,
+        factory: &[u8; 20],
+        proxy_hash: &[u8; 32],
+        salt: &[u8; 32],
+        address: &[u8; 20],
+    ) -> bool {
+        create3_deployed_address(factory, proxy_hash, salt) == *address
     }
 
     /// Compile `src`, bind `inputs`/`lens`/an output buffer, dispatch the

@@ -188,6 +188,27 @@ Each extra leading-zero **byte** (2 nibbles) shaves ~12 gas per calldata
 reference. 12 nibbles (6 bytes) ≈ 2⁴⁸ salts — roughly a day on one modern GPU;
 8 nibbles (2³²) is minutes and the common cost/benefit sweet spot.
 
+### CREATE3 contract addresses (init-code-independent)
+
+Like `--create2`, but the deployed address depends only on `(factory, salt)` —
+**not** on the contract's init code. A salt mined once therefore lands *any*
+contract deployed through that CREATE3 factory on the vanity address. Also
+keccak-only; the salt is public (`scanned_salts.txt`).
+
+```bash
+nullforge-gpu 12 --create3 \
+  --factory     0x<CREATE3 factory address — 20 bytes> \
+  --proxy-hash  0x<keccak256(proxy init code) — 32 bytes, optional>
+```
+
+`--proxy-hash` defaults to the 0xSequence/Solady CREATE3 proxy
+(`keccak256(0x67363d3d37363d34f03d5260086018f3)` = `0x21c35dbe…497c1f`); override
+it only for a factory that deploys a different proxy. The address is derived as
+`proxy = keccak256(0xff ‖ factory ‖ salt ‖ proxy_hash)[12:]`, then
+`address = keccak256(0xd6 0x94 ‖ proxy ‖ 0x01)[12:]` (the proxy's CREATE at nonce
+1). A wrong `--proxy-hash`/`--factory` mines salts for an address you cannot
+actually deploy to, so the miner prints the resolved proxy at startup.
+
 ---
 
 ## CLI reference
@@ -197,6 +218,7 @@ reference. 12 nibbles (6 bytes) ≈ 2⁴⁸ salts — roughly a day on one moder
 | `nullforge [N] [--reveal]` | CPU miner. `N` = target leading-zero nibbles (default `8`, valid `1–40`). |
 | `nullforge-gpu [N] [--reveal]` | Unified CPU + GPU miner (Apple Metal). Same args. |
 | `nullforge-gpu [N] --create2 --deployer 0x.. --init-code-hash 0x..` | Mine a CREATE2 **salt** so a *contract* deploys to an N-leading-zero address (keccak-only; salt is public → plaintext `scanned_salts.txt`). |
+| `nullforge-gpu [N] --create3 --factory 0x.. [--proxy-hash 0x..]` | Mine a CREATE3 **salt** so a *contract* deploys to an N-leading-zero address, **independent of its init code** (keccak-only; salt is public). `--proxy-hash` defaults to the 0xSequence/Solady proxy. |
 | `nullforge-keygen` | One-time setup: prints the SECRET age identity to **stdout**, writes the PUBLIC recipient to `age-recipient.txt`. |
 | `nullforge-decrypt -i <identity> [file]` | Offline recovery: decrypts the key column of `scanned_keys.txt` (default `file`) with your secret identity. |
 

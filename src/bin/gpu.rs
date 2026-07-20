@@ -31,14 +31,18 @@ async fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut reveal = false;
     let mut create2 = false;
+    let mut create3 = false;
     let mut deployer_arg: Option<String> = None;
     let mut ich_arg: Option<String> = None;
+    let mut factory_arg: Option<String> = None;
+    let mut proxyhash_arg: Option<String> = None;
     let mut target_arg: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--reveal" => reveal = true,
             "--create2" => create2 = true,
+            "--create3" => create3 = true,
             "--deployer" => {
                 i += 1;
                 deployer_arg = args.get(i).cloned();
@@ -47,9 +51,17 @@ async fn main() {
                 i += 1;
                 ich_arg = args.get(i).cloned();
             }
+            "--factory" => {
+                i += 1;
+                factory_arg = args.get(i).cloned();
+            }
+            "--proxy-hash" => {
+                i += 1;
+                proxyhash_arg = args.get(i).cloned();
+            }
             a if a.starts_with("--") => {
                 eprintln!(
-                    "unknown flag: {a}\nUsage: nullforge-gpu [target] [--reveal] [--create2 --deployer 0x.. --init-code-hash 0x..]"
+                    "unknown flag: {a}\nUsage: nullforge-gpu [target] [--reveal] [--create2 --deployer 0x.. --init-code-hash 0x..] [--create3 --factory 0x.. [--proxy-hash 0x..]]"
                 );
                 std::process::exit(2);
             }
@@ -81,6 +93,11 @@ async fn main() {
         eprintln!("{note}");
     }
 
+    if create2 && create3 {
+        eprintln!("ERROR: --create2 and --create3 are mutually exclusive");
+        std::process::exit(2);
+    }
+
     // CREATE2 salt-mining mode: keccak-only; the output is a PUBLIC salt, so no
     // age recipient / encryption is involved. Runs to `target` or Ctrl-C.
     if create2 {
@@ -104,6 +121,43 @@ async fn main() {
         println!("nullforge-gpu --create2: mining a CREATE2 address with {target} leading zeros");
         let handle = task::spawn_blocking(move || {
             nullforge::miner::create2::run_create2(&ctx, &deployer, &ich, target, stop);
+        });
+        let _ = handle.await;
+        return;
+    }
+
+    // CREATE3 salt-mining mode: keccak-only, init-code-independent (the deployed
+    // address is a function of factory + salt only, via proxy CREATE2 -> proxy
+    // CREATE at nonce 1). PUBLIC salt, no encryption. Runs to `target` or Ctrl-C.
+    if create3 {
+        let factory: [u8; 20] = parse_hex_arg(factory_arg, "--factory", 20)
+            .try_into()
+            .unwrap();
+        // Default to the 0xSequence/Solady proxy hash; only parse --proxy-hash if given.
+        let proxy_hash: [u8; 32] = if proxyhash_arg.is_some() {
+            parse_hex_arg(proxyhash_arg, "--proxy-hash", 32)
+                .try_into()
+                .unwrap()
+        } else {
+            nullforge::miner::create3::DEFAULT_CREATE3_PROXY_HASH
+        };
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                println!("Received Ctrl+C. Stopping...");
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+        let ctx = MetalContext::new();
+        println!(
+            "nullforge-gpu --create3: mining a CREATE3 address with {target} leading zeros (proxy 0x{})",
+            hex::encode(proxy_hash)
+        );
+        let handle = task::spawn_blocking(move || {
+            nullforge::miner::create3::run_create3(&ctx, &factory, &proxy_hash, target, stop);
         });
         let _ = handle.await;
         return;
