@@ -47,22 +47,11 @@ fn main() {
     let input_path = input_path.unwrap_or_else(|| "scanned_keys.txt".to_string());
 
     // Load the secret identity (first AGE-SECRET-KEY-1... line).
-    let id_contents = std::fs::read_to_string(&identity_path).unwrap_or_else(|e| {
-        eprintln!("ERROR: cannot read identity file {identity_path}: {e}");
-        std::process::exit(1);
-    });
-    let id_line = id_contents
-        .lines()
-        .map(str::trim)
-        .find(|l| l.starts_with("AGE-SECRET-KEY-"))
-        .unwrap_or_else(|| {
-            eprintln!("ERROR: no AGE-SECRET-KEY-1... line found in {identity_path}");
-            std::process::exit(1);
-        });
     let identity = age::x25519::Identity::from_str(id_line).unwrap_or_else(|e| {
         eprintln!("ERROR: invalid age identity: {e}");
         std::process::exit(1);
     });
+    id_contents.zeroize();
 
     // Decrypt each line's key column (col 4). Lines written under --reveal hold
     // plaintext hex there and will simply fail to decrypt (reported, skipped).
