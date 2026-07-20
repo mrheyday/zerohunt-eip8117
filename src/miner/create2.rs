@@ -168,4 +168,11 @@ mod tests {
         assert_eq!(c2_threshold(5, 20), 5);
         assert_eq!(c2_threshold(10, 20), 10);
     }
+
+    #[test]
+    fn threshold_at_target_exactly_equal_to_floor_stays_at_floor() {
+        // Boundary: `target < C2_GPU_FLOOR` clamps down, but `target ==
+        // C2_GPU_FLOOR` must NOT clamp (the `<` comparison is strict).
+        assert_eq!(c2_threshold(0, C2_GPU_FLOOR), C2_GPU_FLOOR as u32);
+    }
 }

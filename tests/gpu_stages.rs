@@ -477,3 +477,77 @@ fn create2_finds_and_verifies_low_threshold() {
         assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Negative-path regressions: the host re-derivation gates (`verify_hit`,
+// `verify_create2`) must reject a claimed address/salt that does not actually
+// match the private key / CREATE2 inputs -- these are the exact checks that
+// gate a "FATAL" hard-abort in the GPU drivers, so a false positive here would
+// be a critical, silent-corruption-class bug.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn verify_hit_rejects_mismatched_address() {
+    use ethers::core::k256::ecdsa::SigningKey;
+    use ethers::utils::secret_key_to_address;
+
+    let ctx = MetalContext::new();
+    let mut privkey = [0u8; 32];
+    privkey[31] = 0x2A;
+    let sk = SigningKey::from_bytes((&privkey).into()).expect("canonical scalar");
+    let real_address = secret_key_to_address(&sk);
+
+    // Sanity: the real (privkey, address) pair must verify.
+    assert!(
+        ctx.verify_hit(privkey, *real_address.as_fixed_bytes()),
+        "genuine hit unexpectedly failed verification"
+    );
+
+    // Tamper with a single byte of the address; the mismatched pair must be
+    // rejected rather than silently accepted.
+    let mut tampered = *real_address.as_fixed_bytes();
+    tampered[0] ^= 0xFF;
+    assert!(
+        !ctx.verify_hit(privkey, tampered),
+        "verify_hit must reject a tampered address for the same private key"
+    );
+}
+
+#[test]
+fn verify_create2_rejects_tampered_hit() {
+    use ethers::types::Address;
+    use ethers::utils::get_create2_address_from_hash;
+
+    let ctx = MetalContext::new();
+    let deployer: [u8; 20] = [0x33; 20];
+    let initcodehash: [u8; 32] = [0x44; 32];
+    let salt: [u8; 32] = [0x55; 32];
+    let address = *get_create2_address_from_hash(
+        Address::from_slice(&deployer),
+        salt,
+        initcodehash,
+    )
+    .as_fixed_bytes();
+
+    // Sanity: the real (salt, address) pair must verify.
+    assert!(
+        ctx.verify_create2(&deployer, &initcodehash, &salt, &address),
+        "genuine CREATE2 hit unexpectedly failed verification"
+    );
+
+    // A tampered salt must no longer re-derive the same address.
+    let mut tampered_salt = salt;
+    tampered_salt[31] ^= 0xFF;
+    assert!(
+        !ctx.verify_create2(&deployer, &initcodehash, &tampered_salt, &address),
+        "verify_create2 must reject a salt that doesn't derive the claimed address"
+    );
+
+    // A tampered address must not verify against the original, genuine salt.
+    let mut tampered_address = address;
+    tampered_address[0] ^= 0xFF;
+    assert!(
+        !ctx.verify_create2(&deployer, &initcodehash, &salt, &tampered_address),
+        "verify_create2 must reject a claimed address that doesn't match the salt"
+    );
+}
