@@ -64,14 +64,50 @@ cd zerohunt-eip8117
 cargo build --release
 ```
 
-This produces two binaries:
+This produces four binaries under `target/release/`:
 
-- `target/release/nullforge` — CPU miner
-- `target/release/nullforge-gpu` — unified CPU + GPU miner
+- `nullforge` — CPU miner
+- `nullforge-gpu` — unified CPU + GPU miner
+- `nullforge-keygen` — one-time encrypted-output setup
+- `nullforge-decrypt` — offline key recovery
+
+---
+
+## Quickstart
+
+The complete happy path, top to bottom:
+
+```bash
+# 1. Build (see above) — produces the four binaries under target/release/.
+
+# 2. ONE-TIME SETUP (run on a trusted machine). Generates your age identity:
+#    the SECRET is printed to stdout — store it OFFLINE, it is the ONLY thing
+#    that can decrypt mined keys. The PUBLIC recipient is written to
+#    ./age-recipient.txt, which is all the miner needs.
+./target/release/nullforge-keygen > ~/nullforge-identity.txt   # keep this file OFFLINE
+
+# 3. MINE. Output is encrypted to that recipient by default. The argument is the
+#    target number of leading-zero nibbles (default 8; valid 1–40). Ctrl-C stops.
+./target/release/nullforge-gpu 8      # unified CPU + GPU (Apple Silicon)
+#    …or CPU-only:
+./target/release/nullforge 8
+
+# 4. RECOVER the mined key(s) OFFLINE, using your secret identity:
+./target/release/nullforge-decrypt --identity ~/nullforge-identity.txt scanned_keys.txt
+#    -> prints:  <address> <TAB> <leading_zeros> <TAB> <private_key_hex>
+```
+
+> **Without step 2 the miner fails closed** — it refuses to run rather than write
+> plaintext keys. For throwaway local testing only, skip the setup and pass
+> `--reveal` to write raw hex instead (insecure; it prints a warning).
 
 ---
 
 ## Usage
+
+> First-time? Do the one-time `nullforge-keygen` setup from the
+> [Quickstart](#quickstart) — the miner encrypts by default and **fails closed**
+> without a recipient.
 
 Both tools take **one optional argument: the target number of leading zero
 nibbles** (default `8`). The miner runs until it finds an address with at least
@@ -128,6 +164,33 @@ cargo run --release --bin nullforge -- 9
 
 The CPU tool additionally tracks **consecutive repeating characters** after the
 leading zeros (e.g. `0x0000bbbb…`) as a secondary "interestingness" signal.
+
+---
+
+## CLI reference
+
+| Command | What it does |
+|---|---|
+| `nullforge [N] [--reveal]` | CPU miner. `N` = target leading-zero nibbles (default `8`, valid `1–40`). |
+| `nullforge-gpu [N] [--reveal]` | Unified CPU + GPU miner (Apple Metal). Same args. |
+| `nullforge-keygen` | One-time setup: prints the SECRET age identity to **stdout**, writes the PUBLIC recipient to `age-recipient.txt`. |
+| `nullforge-decrypt -i <identity> [file]` | Offline recovery: decrypts the key column of `scanned_keys.txt` (default `file`) with your secret identity. |
+
+**Flags**
+
+- `--reveal` — write/print raw **plaintext** hex keys instead of encrypting.
+  Insecure; the only way plaintext is ever emitted, and it prints a warning.
+
+**Environment variables**
+
+| Variable | Effect |
+|---|---|
+| `NULLFORGE_AGE_RECIPIENT` | `age1…` recipient the miner encrypts to (takes precedence over `age-recipient.txt`). |
+| `NULLFORGE_AGE_IDENTITY_FILE` | Default secret-identity path for `nullforge-decrypt` (instead of `-i`). |
+
+Each extra leading zero is ~16× more work, so targets above ~10–12 nibbles are
+astronomically infeasible to brute-force — the miner prints a warning and runs
+until Ctrl-C.
 
 ---
 
