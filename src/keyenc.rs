@@ -119,4 +119,82 @@ mod tests {
             KeySink::RevealPlaintext
         ));
     }
+
+    #[test]
+    fn parse_recipient_rejects_garbage() {
+        let err = parse_recipient("not-an-age-recipient").unwrap_err();
+        assert!(
+            err.contains("invalid age recipient"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_recipient_accepts_a_generated_identitys_public_key() {
+        let identity = age::x25519::Identity::generate();
+        let recipient_str = identity.to_public().to_string();
+        let parsed = parse_recipient(&recipient_str).unwrap();
+        assert_eq!(parsed.to_string(), recipient_str);
+    }
+
+    #[test]
+    fn decrypt_fails_with_wrong_identity() {
+        // Encrypt to recipient A, then try to decrypt with unrelated identity B.
+        let identity_a = age::x25519::Identity::generate();
+        let identity_b = age::x25519::Identity::generate();
+        let sink = KeySink::Encrypt(identity_a.to_public());
+
+        let privkey: [u8; 32] = [0x42; 32];
+        let field = encode_key_field(&sink, &privkey).unwrap();
+
+        assert!(
+            decrypt_key_field(&identity_b, &field).is_err(),
+            "decrypting with the wrong identity must fail"
+        );
+        // ...and the correct identity still recovers it.
+        assert_eq!(
+            decrypt_key_field(&identity_a, &field).unwrap(),
+            privkey.to_vec()
+        );
+    }
+
+    #[test]
+    fn decrypt_fails_on_malformed_base64() {
+        let identity = age::x25519::Identity::generate();
+        let err = decrypt_key_field(&identity, "not valid base64 !!!").unwrap_err();
+        assert!(err.contains("base64 decode failed"), "got: {err}");
+    }
+
+    #[test]
+    fn decrypt_fails_on_valid_base64_that_is_not_age_ciphertext() {
+        let identity = age::x25519::Identity::generate();
+        // Valid base64, but the decoded bytes are not a real age payload.
+        let field = BASE64_STANDARD.encode(b"just some random bytes, not age ciphertext");
+        let err = decrypt_key_field(&identity, &field).unwrap_err();
+        assert!(err.contains("age decrypt failed"), "got: {err}");
+    }
+
+    #[test]
+    fn encrypting_the_same_key_twice_produces_different_ciphertext() {
+        // age/X25519 encryption is randomized (ephemeral key + nonce per call), so
+        // encoding the same plaintext key twice must not yield identical output —
+        // a regression guard against an accidental deterministic/ECB-style bug.
+        let identity = age::x25519::Identity::generate();
+        let sink = KeySink::Encrypt(identity.to_public());
+        let privkey: [u8; 32] = [0x99; 32];
+
+        let field1 = encode_key_field(&sink, &privkey).unwrap();
+        let field2 = encode_key_field(&sink, &privkey).unwrap();
+        assert_ne!(field1, field2, "ciphertext should not be deterministic");
+
+        // Both still decrypt back to the same plaintext.
+        assert_eq!(
+            decrypt_key_field(&identity, &field1).unwrap(),
+            privkey.to_vec()
+        );
+        assert_eq!(
+            decrypt_key_field(&identity, &field2).unwrap(),
+            privkey.to_vec()
+        );
+    }
 }

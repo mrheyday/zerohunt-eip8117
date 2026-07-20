@@ -69,4 +69,25 @@ mod tests {
         assert!(feasibility_note(12).is_some());
         assert!(feasibility_note(32).unwrap().contains("16^32"));
     }
+
+    #[test]
+    fn error_messages_name_the_offending_value_and_the_max() {
+        let err_zero = validate_target(0).unwrap_err();
+        assert!(err_zero.contains("at least 1"), "got: {err_zero}");
+
+        let err_over = validate_target(41).unwrap_err();
+        assert!(err_over.contains("41"), "got: {err_over}");
+        assert!(
+            err_over.contains(&MAX_LEADING_ZERO_NIBBLES.to_string()),
+            "got: {err_over}"
+        );
+    }
+
+    #[test]
+    fn feasibility_note_boundary_at_exactly_twelve() {
+        // 11 -> no warning, 12 -> warning; the cutoff is exclusive on the low side.
+        assert!(feasibility_note(11).is_none());
+        let note = feasibility_note(12).unwrap();
+        assert!(note.contains("12"), "got: {note}");
+    }
 }

@@ -130,8 +130,7 @@ impl MinerShared {
         match keyenc::encode_key_field(&self.key_sink, &privkey) {
             Ok(key_field) => {
                 let mut file = self.file.lock().unwrap();
-                writeln!(file, "{}\t{}\t{}\t{}", total, notated, zeros, key_field)
-                    .expect("Unable to write hit to file");
+                let _ = writeln!(file, "{}\t{}\t{}\t{}", total, notated, zeros, key_field);
             }
             Err(e) => {
                 eprintln!(
@@ -250,5 +249,34 @@ mod tests {
         shared.add_keys(Engine::Cpu, 5);
         assert_eq!(shared.cpu_keys(), 105);
         assert_eq!(shared.gpu_keys(), 250);
+    }
+
+    #[test]
+    fn report_hit_with_encrypt_sink_writes_ciphertext_not_plaintext() {
+        let identity = age::x25519::Identity::generate();
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let shared = MinerShared::new(
+            8,
+            f.reopen().unwrap(),
+            Instant::now(),
+            crate::keyenc::KeySink::Encrypt(identity.to_public()),
+        );
+
+        let privkey = [0x77u8; 32];
+        let addr = "0x00000000abcd0123456789012345678901234567"; // 8 zeros
+        assert!(shared.report_hit(Engine::Cpu, privkey, addr, 8));
+
+        let line = read_file(&f);
+        let plaintext_hex = ethers::utils::hex::encode(privkey);
+        assert!(
+            !line.contains(&plaintext_hex),
+            "plaintext key leaked into scanned_keys.txt line: {line}"
+        );
+
+        // The 4th tab-separated column is the key field; it must decrypt back to
+        // the exact private key with the matching secret identity.
+        let key_field = line.trim().split('\t').nth(3).expect("key column");
+        let recovered = crate::keyenc::decrypt_key_field(&identity, key_field).unwrap();
+        assert_eq!(recovered, privkey.to_vec());
     }
 }

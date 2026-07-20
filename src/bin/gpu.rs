@@ -249,3 +249,47 @@ fn parse_hex_arg(val: Option<String>, flag: &str, want_bytes: usize) -> Vec<u8> 
     }
     bytes
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // NOTE: only the success paths are exercised here — every error branch of
+    // `parse_hex_arg` calls `std::process::exit`, which would tear down the test
+    // process itself rather than fail the assertion, so those paths are not
+    // unit-testable in-process (they are covered by the CLI usage doc / would
+    // need an out-of-process test that spawns the built binary).
+
+    #[test]
+    fn parses_0x_prefixed_hex_of_exact_length() {
+        // 20-byte deployer example (40 hex chars after 0x).
+        let deployer20 = "0x0102030405060708090a0b0c0d0e0f1011121314".to_string();
+        let bytes = parse_hex_arg(Some(deployer20), "--deployer", 20);
+        assert_eq!(
+            bytes,
+            vec![
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_hex_without_0x_prefix() {
+        let ich = "22".repeat(32); // 32 bytes, no "0x" prefix
+        let bytes = parse_hex_arg(Some(ich), "--init-code-hash", 32);
+        assert_eq!(bytes, vec![0x22u8; 32]);
+    }
+
+    #[test]
+    fn parses_all_zero_and_all_ff_edge_values() {
+        let zero = format!("0x{}", "00".repeat(20));
+        assert_eq!(parse_hex_arg(Some(zero), "--deployer", 20), vec![0u8; 20]);
+
+        let max = format!("0x{}", "ff".repeat(32));
+        assert_eq!(
+            parse_hex_arg(Some(max), "--init-code-hash", 32),
+            vec![0xffu8; 32]
+        );
+    }
+}

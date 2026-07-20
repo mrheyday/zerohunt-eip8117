@@ -140,3 +140,32 @@ pub fn run_create2(
         println!("Stopped before any qualifying salt was found.");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn threshold_floors_at_gpu_floor_and_rises_with_best() {
+        assert_eq!(c2_threshold(0, 12), C2_GPU_FLOOR as u32); // start at floor
+        assert_eq!(c2_threshold(3, 12), C2_GPU_FLOOR as u32); // best below floor -> floor
+        assert_eq!(c2_threshold(6, 12), 6); // best above floor -> best
+    }
+
+    #[test]
+    fn threshold_clamps_to_target_when_target_below_floor() {
+        // e.g. `nullforge-gpu 2 --create2 ...`: we must still surface >=2 hits
+        // instead of flooring at C2_GPU_FLOOR (which would never match target 2).
+        assert_eq!(c2_threshold(0, 2), 2);
+        assert_eq!(c2_threshold(0, 1), 1);
+    }
+
+    #[test]
+    fn threshold_never_drops_below_current_best() {
+        // Monotonic: once the best has risen above the floor, the threshold
+        // tracks it exactly (never regresses), so later batches don't re-report
+        // hits the caller has already surfaced.
+        assert_eq!(c2_threshold(5, 20), 5);
+        assert_eq!(c2_threshold(10, 20), 10);
+    }
+}
