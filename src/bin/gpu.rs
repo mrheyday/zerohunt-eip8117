@@ -25,17 +25,45 @@ const UTILIZATION: f64 = 0.80;
 
 #[tokio::main]
 async fn main() {
-    // CLI: `nullforge-gpu [target_zeros] [--reveal]`, default 8 (mirrors the CPU tool).
+    // CLI: `nullforge-gpu [target_zeros] [--reveal]` (EOA mode), or
+    //      `nullforge-gpu [target] --create2 --deployer 0x.. --init-code-hash 0x..`
+    // Structured parse so flag VALUES (0x..) aren't mistaken for the target.
     let args: Vec<String> = env::args().skip(1).collect();
-    let reveal = args.iter().any(|a| a == "--reveal");
-    let target: usize = match args.iter().find(|a| !a.starts_with("--")) {
+    let mut reveal = false;
+    let mut create2 = false;
+    let mut deployer_arg: Option<String> = None;
+    let mut ich_arg: Option<String> = None;
+    let mut target_arg: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--reveal" => reveal = true,
+            "--create2" => create2 = true,
+            "--deployer" => {
+                i += 1;
+                deployer_arg = args.get(i).cloned();
+            }
+            "--init-code-hash" => {
+                i += 1;
+                ich_arg = args.get(i).cloned();
+            }
+            a if a.starts_with("--") => {
+                eprintln!(
+                    "unknown flag: {a}\nUsage: nullforge-gpu [target] [--reveal] [--create2 --deployer 0x.. --init-code-hash 0x..]"
+                );
+                std::process::exit(2);
+            }
+            a if target_arg.is_none() => target_arg = Some(a.to_string()),
+            _ => {}
+        }
+        i += 1;
+    }
+    let target: usize = match target_arg {
         None => 8,
         Some(arg) => match arg.trim().parse() {
             Ok(n) => n,
             Err(_) => {
-                eprintln!(
-                    "Invalid leading-zero count: {arg:?}\nUsage: nullforge-gpu [target_zeros] [--reveal]   (positive integer, default 8)"
-                );
+                eprintln!("Invalid leading-zero count: {arg:?}");
                 std::process::exit(2);
             }
         },
@@ -51,6 +79,34 @@ async fn main() {
     };
     if let Some(note) = nullforge::target::feasibility_note(target) {
         eprintln!("{note}");
+    }
+
+    // CREATE2 salt-mining mode: keccak-only; the output is a PUBLIC salt, so no
+    // age recipient / encryption is involved. Runs to `target` or Ctrl-C.
+    if create2 {
+        let deployer: [u8; 20] = parse_hex_arg(deployer_arg, "--deployer", 20)
+            .try_into()
+            .unwrap();
+        let ich: [u8; 32] = parse_hex_arg(ich_arg, "--init-code-hash", 32)
+            .try_into()
+            .unwrap();
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                println!("Received Ctrl+C. Stopping...");
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+        let ctx = MetalContext::new();
+        println!("nullforge-gpu --create2: mining a CREATE2 address with {target} leading zeros");
+        let handle = task::spawn_blocking(move || {
+            nullforge::miner::create2::run_create2(&ctx, &deployer, &ich, target, stop);
+        });
+        let _ = handle.await;
+        return;
     }
 
     // Resolve how found keys are written. Fail closed if no age recipient is
@@ -168,4 +224,28 @@ async fn main() {
         }
         None => println!("No wallet found."),
     }
+}
+
+/// Parse a required `0x`-prefixed hex CLI arg of exactly `want_bytes` bytes
+/// (for `--deployer` / `--init-code-hash` in CREATE2 mode). Exits with a clear
+/// message on any problem.
+fn parse_hex_arg(val: Option<String>, flag: &str, want_bytes: usize) -> Vec<u8> {
+    let val = val.unwrap_or_else(|| {
+        eprintln!("ERROR: {flag} <0x...> is required with --create2");
+        std::process::exit(2);
+    });
+    let s = val.strip_prefix("0x").unwrap_or(&val);
+    let bytes = hex::decode(s).unwrap_or_else(|e| {
+        eprintln!("ERROR: {flag}: invalid hex: {e}");
+        std::process::exit(2);
+    });
+    if bytes.len() != want_bytes {
+        eprintln!(
+            "ERROR: {flag}: expected {want_bytes} bytes ({} hex chars), got {}",
+            want_bytes * 2,
+            bytes.len()
+        );
+        std::process::exit(2);
+    }
+    bytes
 }

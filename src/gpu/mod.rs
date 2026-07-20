@@ -10,6 +10,9 @@ pub struct MetalContext {
     /// every `dispatch_mine` batch. Compiling the full secp256k1+keccak MSL per
     /// batch was the GPU path's dominant cost (it made the GPU slower than CPU).
     mine_pipeline: ComputePipelineState,
+    /// The `mine_create2` pipeline (keccak-only), compiled once and reused by
+    /// every `dispatch_create2` batch. CREATE2 salt mining needs no secp256k1.
+    create2_pipeline: ComputePipelineState,
 }
 
 /// A verified-candidate mining hit: a private key whose derived Ethereum
@@ -19,6 +22,16 @@ pub struct MetalContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hit {
     pub privkey: [u8; 32],
+    pub address: [u8; 20],
+    pub zeros: u8,
+}
+
+/// A CREATE2 vanity-salt hit: a salt whose resulting contract address (from a
+/// fixed deployer + init-code hash) has `zeros` leading zero nibbles. Callers
+/// MUST re-verify via `MetalContext::verify_create2` before trusting `address`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Create2Hit {
+    pub salt: [u8; 32],
     pub address: [u8; 20],
     pub zeros: u8,
 }
@@ -33,11 +46,31 @@ impl MetalContext {
         let device = Device::system_default().expect("no Metal device");
         let queue = device.new_command_queue();
         let mine_pipeline = Self::build_mine_pipeline(&device);
+        let create2_pipeline = Self::build_create2_pipeline(&device);
         Self {
             device,
             queue,
             mine_pipeline,
+            create2_pipeline,
         }
+    }
+
+    /// Compile the CREATE2 MSL (keccak + create2, no secp256k1) and build the
+    /// `mine_create2` pipeline. Called once from `new()`, reused by every
+    /// `dispatch_create2` call.
+    fn build_create2_pipeline(device: &Device) -> ComputePipelineState {
+        let keccak_src = include_str!("../../kernels/keccak.metal");
+        let create2_src = include_str!("../../kernels/create2.metal");
+        let src = format!("{keccak_src}\n{create2_src}");
+        let lib = device
+            .new_library_with_source(&src, &CompileOptions::new())
+            .expect("create2 kernel compile failed");
+        let func = lib
+            .get_function("mine_create2", None)
+            .expect("mine_create2 entry not found");
+        device
+            .new_compute_pipeline_state_with_function(&func)
+            .expect("create2 pipeline")
     }
 
     /// Assemble the concatenated miner MSL (keccak+field+ec+miner) and build the
@@ -53,7 +86,9 @@ impl MetalContext {
         let lib = device
             .new_library_with_source(&src, &CompileOptions::new())
             .expect("miner kernel compile failed");
-        let func = lib.get_function("mine", None).expect("mine entry not found");
+        let func = lib
+            .get_function("mine", None)
+            .expect("mine entry not found");
         device
             .new_compute_pipeline_state_with_function(&func)
             .expect("mine pipeline")
@@ -127,7 +162,9 @@ impl MetalContext {
             .device
             .new_library_with_source(src, &CompileOptions::new())
             .expect("kernel compile failed");
-        let func = lib.get_function("field_test", None).expect("entry not found");
+        let func = lib
+            .get_function("field_test", None)
+            .expect("entry not found");
         let pipeline = self
             .device
             .new_compute_pipeline_state_with_function(&func)
@@ -253,7 +290,11 @@ impl MetalContext {
         seeds: &[[u8; 32]],
         counters: &[u64],
     ) -> Vec<([u8; 32], [u8; 20])> {
-        assert_eq!(seeds.len(), counters.len(), "seeds/counters length mismatch");
+        assert_eq!(
+            seeds.len(),
+            counters.len(),
+            "seeds/counters length mismatch"
+        );
         let n = seeds.len();
 
         let mut seed_bytes = vec![0u8; n * 32];
@@ -271,7 +312,9 @@ impl MetalContext {
             .device
             .new_library_with_source(&src, &CompileOptions::new())
             .expect("kernel compile failed");
-        let func = lib.get_function("derive_test", None).expect("entry not found");
+        let func = lib
+            .get_function("derive_test", None)
+            .expect("entry not found");
         let pipeline = self
             .device
             .new_compute_pipeline_state_with_function(&func)
@@ -455,6 +498,146 @@ impl MetalContext {
         }
     }
 
+    /// Search `iters` salts per thread via `kernels/create2.metal`'s
+    /// `mine_create2` kernel: for a fixed `deployer` (20 bytes) and
+    /// `initcodehash` (32 bytes), return every CREATE2 address with `>= threshold`
+    /// leading-zero nibbles (bounded to 1024 hits/call, like `dispatch_mine`).
+    /// Each thread's salt is `base_salts[gid]` with its low 8 bytes replaced by
+    /// `base_counters[gid] + it`.
+    ///
+    /// SECURITY: every returned `Create2Hit` is a GPU candidate; callers MUST
+    /// re-verify with `verify_create2` before trusting `address`.
+    pub fn dispatch_create2(
+        &self,
+        deployer: &[u8; 20],
+        initcodehash: &[u8; 32],
+        base_salts: &[[u8; 32]],
+        base_counters: &[u64],
+        iters: u32,
+        threshold: u32,
+    ) -> Vec<Create2Hit> {
+        assert_eq!(
+            base_salts.len(),
+            base_counters.len(),
+            "base_salts/base_counters length mismatch"
+        );
+        let n = base_salts.len();
+
+        let mut salt_bytes = vec![0u8; n * 32];
+        for (i, s) in base_salts.iter().enumerate() {
+            salt_bytes[i * 32..i * 32 + 32].copy_from_slice(s);
+        }
+
+        let deployer_buf = self.device.new_buffer_with_data(
+            deployer.as_ptr() as *const std::ffi::c_void,
+            20,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let ich_buf = self.device.new_buffer_with_data(
+            initcodehash.as_ptr() as *const std::ffi::c_void,
+            32,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let salts_buf = self.device.new_buffer_with_data(
+            salt_bytes.as_ptr() as *const std::ffi::c_void,
+            salt_bytes.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let counters_buf = self.device.new_buffer_with_data(
+            base_counters.as_ptr() as *const std::ffi::c_void,
+            std::mem::size_of_val(base_counters) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let iters_buf = self.device.new_buffer_with_data(
+            &iters as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let threshold_buf = self.device.new_buffer_with_data(
+            &threshold as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let hit_count_buf = self.device.new_buffer(
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        unsafe {
+            std::ptr::write_bytes(
+                hit_count_buf.contents() as *mut u8,
+                0,
+                std::mem::size_of::<u32>(),
+            );
+        }
+        let hits_bytes = MINE_MAX_HITS * MINE_HIT_STRIDE;
+        let hits_buf = self
+            .device
+            .new_buffer(hits_bytes as u64, MTLResourceOptions::StorageModeShared);
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&self.create2_pipeline);
+        enc.set_buffer(0, Some(&deployer_buf), 0);
+        enc.set_buffer(1, Some(&ich_buf), 0);
+        enc.set_buffer(2, Some(&salts_buf), 0);
+        enc.set_buffer(3, Some(&counters_buf), 0);
+        enc.set_buffer(4, Some(&iters_buf), 0);
+        enc.set_buffer(5, Some(&threshold_buf), 0);
+        enc.set_buffer(6, Some(&hit_count_buf), 0);
+        enc.set_buffer(7, Some(&hits_buf), 0);
+        // Same threadgroup-occupancy sizing as dispatch_mine.
+        let tg = self
+            .create2_pipeline
+            .max_total_threads_per_threadgroup()
+            .min(n as u64)
+            .max(1);
+        enc.dispatch_threads(MTLSize::new(n as u64, 1, 1), MTLSize::new(tg, 1, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let found = unsafe { *(hit_count_buf.contents() as *const u32) } as usize;
+        let count = found.min(MINE_MAX_HITS);
+        let ptr = hits_buf.contents() as *const u8;
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, hits_bytes) };
+
+        (0..count)
+            .map(|i| {
+                let rec = i * MINE_HIT_STRIDE;
+                let mut salt = [0u8; 32];
+                salt.copy_from_slice(&bytes[rec..rec + 32]);
+                let mut address = [0u8; 20];
+                address.copy_from_slice(&bytes[rec + 32..rec + 52]);
+                let zeros = bytes[rec + 52];
+                Create2Hit {
+                    salt,
+                    address,
+                    zeros,
+                }
+            })
+            .collect()
+    }
+
+    /// Host-side re-derivation gate for a CREATE2 hit: recompute
+    /// `keccak256(0xff ‖ deployer ‖ salt ‖ initcodehash)[12..32]` and compare it
+    /// to `address`. Returns `false` on any mismatch (a GPU bug must never emit a
+    /// bad salt).
+    pub fn verify_create2(
+        &self,
+        deployer: &[u8; 20],
+        initcodehash: &[u8; 32],
+        salt: &[u8; 32],
+        address: &[u8; 20],
+    ) -> bool {
+        use ethers::utils::keccak256;
+        let mut preimage = Vec::with_capacity(85);
+        preimage.push(0xff);
+        preimage.extend_from_slice(deployer);
+        preimage.extend_from_slice(salt);
+        preimage.extend_from_slice(initcodehash);
+        &keccak256(&preimage)[12..32] == address
+    }
+
     /// Compile `src`, bind `inputs`/`lens`/an output buffer, dispatch the
     /// `keccak_test` kernel over `n` threads (one per input), and return the
     /// resulting 32-byte digests.
@@ -463,7 +646,9 @@ impl MetalContext {
             .device
             .new_library_with_source(src, &CompileOptions::new())
             .expect("kernel compile failed");
-        let func = lib.get_function("keccak_test", None).expect("entry not found");
+        let func = lib
+            .get_function("keccak_test", None)
+            .expect("entry not found");
         let pipeline = self
             .device
             .new_compute_pipeline_state_with_function(&func)
@@ -498,7 +683,9 @@ impl MetalContext {
         let ptr = out_buf.contents() as *const u8;
         let bytes = unsafe { std::slice::from_raw_parts(ptr, n * 32) };
         bytes
-            .as_chunks::<32>().0.iter()
+            .as_chunks::<32>()
+            .0
+            .iter()
             .map(|c| {
                 let mut out = [0u8; 32];
                 out.copy_from_slice(c);

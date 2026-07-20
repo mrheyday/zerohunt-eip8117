@@ -307,3 +307,54 @@ fn gpu_driver_finds_and_reports_low_target() {
         .unwrap();
     assert!(!contents.trim().is_empty(), "file should have a hit line");
 }
+
+// ---------------------------------------------------------------------------
+// CREATE2 salt mining: keccak-only kernel, cross-checked against ethers'
+// canonical CREATE2 address derivation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create2_finds_and_verifies_low_threshold() {
+    use ethers::types::Address;
+    use ethers::utils::get_create2_address_from_hash;
+
+    let ctx = MetalContext::new();
+    let deployer: [u8; 20] = [0x11; 20];
+    let initcodehash: [u8; 32] = [0x22; 32];
+
+    let n = 256usize;
+    let base_salts: Vec<[u8; 32]> = (0..n)
+        .map(|i| {
+            let mut s = [0u8; 32];
+            s[0] = (i & 0xff) as u8;
+            s[1] = (i >> 8) as u8;
+            s[23] = 0x11;
+            s
+        })
+        .collect();
+    let base_counters: Vec<u64> = vec![0u64; n];
+
+    // >= 2 leading zero nibbles across 256*4096 candidates -> plenty of hits fast.
+    let hits = ctx.dispatch_create2(
+        &deployer,
+        &initcodehash,
+        &base_salts,
+        &base_counters,
+        4096,
+        2,
+    );
+    assert!(!hits.is_empty(), "should find >=2-zero CREATE2 addresses");
+
+    for h in &hits {
+        // Host re-derivation gate.
+        assert!(
+            ctx.verify_create2(&deployer, &initcodehash, &h.salt, &h.address),
+            "GPU CREATE2 hit failed host re-derivation"
+        );
+        // Independent cross-check against ethers' canonical CREATE2.
+        let want =
+            get_create2_address_from_hash(Address::from_slice(&deployer), h.salt, initcodehash);
+        assert_eq!(want.as_bytes(), h.address, "CREATE2 address != ethers");
+        assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
+    }
+}

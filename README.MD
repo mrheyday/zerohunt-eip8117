@@ -165,6 +165,29 @@ cargo run --release --bin nullforge -- 9
 The CPU tool additionally tracks **consecutive repeating characters** after the
 leading zeros (e.g. `0x0000bbbb…`) as a secondary "interestingness" signal.
 
+### CREATE2 contract addresses (gas-optimized deploys)
+
+For a **contract** whose *deployed address* has leading zeros — to save calldata
+gas, worth it for a contract referenced in nearly every tx — you mine a
+**CREATE2 salt**, not an EOA key. This mode is **keccak-only** (no secp256k1), so
+it's far faster than the EOA miner, and the result is a **public salt**: nothing
+is encrypted.
+
+```bash
+nullforge-gpu 12 --create2 \
+  --deployer        0x<CREATE2 factory / deployer — 20 bytes> \
+  --init-code-hash  0x<keccak256(init code) of the contract — 32 bytes>
+```
+
+Each new best is printed and appended as `<total>\t<address>\t<zeros>\t<salt>`
+to `scanned_salts.txt`. Deploy the contract through your CREATE2 factory with the
+found salt and it lands on the vanity address:
+`address = keccak256(0xff ‖ deployer ‖ salt ‖ init_code_hash)[12:]`.
+
+Each extra leading-zero **byte** (2 nibbles) shaves ~12 gas per calldata
+reference. 12 nibbles (6 bytes) ≈ 2⁴⁸ salts — roughly a day on one modern GPU;
+8 nibbles (2³²) is minutes and the common cost/benefit sweet spot.
+
 ---
 
 ## CLI reference
@@ -173,6 +196,7 @@ leading zeros (e.g. `0x0000bbbb…`) as a secondary "interestingness" signal.
 |---|---|
 | `nullforge [N] [--reveal]` | CPU miner. `N` = target leading-zero nibbles (default `8`, valid `1–40`). |
 | `nullforge-gpu [N] [--reveal]` | Unified CPU + GPU miner (Apple Metal). Same args. |
+| `nullforge-gpu [N] --create2 --deployer 0x.. --init-code-hash 0x..` | Mine a CREATE2 **salt** so a *contract* deploys to an N-leading-zero address (keccak-only; salt is public → plaintext `scanned_salts.txt`). |
 | `nullforge-keygen` | One-time setup: prints the SECRET age identity to **stdout**, writes the PUBLIC recipient to `age-recipient.txt`. |
 | `nullforge-decrypt -i <identity> [file]` | Offline recovery: decrypts the key column of `scanned_keys.txt` (default `file`) with your secret identity. |
 
