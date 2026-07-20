@@ -88,12 +88,12 @@ mod tests {
     fn threshold_floors_at_gpu_floor_and_rises_with_best() {
         assert_eq!(gpu_threshold(0, 8), GPU_FLOOR as u32); // start at floor
         assert_eq!(gpu_threshold(3, 8), GPU_FLOOR as u32); // best below floor -> floor
-        assert_eq!(gpu_threshold(6, 8), 6);                // best above floor -> best
+        assert_eq!(gpu_threshold(6, 8), 6); // best above floor -> best
     }
 
     #[test]
     fn threshold_clamps_to_target_when_target_below_floor() {
-        // e.g. `zerohunt-gpu 2`: we must still surface >=2 hits
+        // e.g. `nullforge-gpu 2`: we must still surface >=2 hits
         assert_eq!(gpu_threshold(0, 2), 2);
     }
 }

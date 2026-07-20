@@ -1,21 +1,21 @@
-//! zerohunt-decrypt: offline recovery of encrypted mined keys.
+//! nullforge-decrypt: offline recovery of encrypted mined keys.
 //!
 //! Run this on a TRUSTED / OFFLINE machine that has your SECRET age identity.
 //! It reads `scanned_keys.txt` (or a path you pass), decrypts the base64/age
 //! key column with your identity, and prints `address <TAB> zeros <TAB> privkey`.
 //!
-//!   zerohunt-decrypt --identity /Volumes/OFFLINE/age-identity.txt [scanned_keys.txt]
+//!   nullforge-decrypt --identity /Volumes/OFFLINE/age-identity.txt [scanned_keys.txt]
 use std::str::FromStr;
 
 use ethers::utils::hex;
-use zerohunt::keyenc;
+use nullforge::keyenc;
 use zeroize::Zeroize;
 
 fn usage_exit() -> ! {
     eprintln!(
-        "usage: zerohunt-decrypt --identity <age-identity-file> [scanned_keys.txt]\n\
+        "usage: nullforge-decrypt --identity <age-identity-file> [scanned_keys.txt]\n\
          \n  The identity file holds your AGE-SECRET-KEY-1... secret; keep it OFFLINE.\n\
-         \n  Env fallback for the identity path: ZEROHUNT_AGE_IDENTITY_FILE."
+         \n  Env fallback for the identity path: NULLFORGE_AGE_IDENTITY_FILE."
     );
     std::process::exit(2);
 }
@@ -42,7 +42,7 @@ fn main() {
     }
 
     let identity_path = identity_path
-        .or_else(|| std::env::var("ZEROHUNT_AGE_IDENTITY_FILE").ok())
+        .or_else(|| std::env::var("NULLFORGE_AGE_IDENTITY_FILE").ok())
         .unwrap_or_else(|| usage_exit());
     let input_path = input_path.unwrap_or_else(|| "scanned_keys.txt".to_string());
 

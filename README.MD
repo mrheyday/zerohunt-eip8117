@@ -1,12 +1,12 @@
-# ZeroHunt
+# Nullforge
 
-ZeroHunt mines Ethereum vanity addresses with the maximum number of **leading
+Nullforge mines Ethereum vanity addresses with the maximum number of **leading
 zero nibbles** (e.g. `0x00000000…`). Such addresses are increasingly used by
 protocols to resist [address-poisoning](https://eips.ethereum.org/EIPS/eip-8117)
-attacks and to save calldata gas. ZeroHunt ships two miners:
+attacks and to save calldata gas. Nullforge ships two miners:
 
-- **`zerohunt`** — a multi-threaded **CPU** miner.
-- **`zerohunt-gpu`** — a **unified CPU + GPU** miner (Apple Metal) that runs both
+- **`nullforge`** — a multi-threaded **CPU** miner.
+- **`nullforge-gpu`** — a **unified CPU + GPU** miner (Apple Metal) that runs both
   engines in one process against a shared best-tracker.
 
 Results are displayed in **[ERC-8117](https://eips.ethereum.org/EIPS/eip-8117)**
@@ -43,8 +43,8 @@ Results are displayed in **[ERC-8117](https://eips.ethereum.org/EIPS/eip-8117)**
 - **macOS** with an Apple **Metal** GPU (developed and tested on Apple Silicon,
   M1 Pro). The crate depends on the [`metal`](https://crates.io/crates/metal)
   crate, which links `Metal.framework`, so the project currently **builds on
-  macOS only**. The `zerohunt-gpu` miner needs a working Metal device; the
-  `zerohunt` CPU miner needs only the CPU (but still builds via the macOS
+  macOS only**. The `nullforge-gpu` miner needs a working Metal device; the
+  `nullforge` CPU miner needs only the CPU (but still builds via the macOS
   toolchain).
 - **Rust** (stable, 2021 edition) — install with [rustup](https://rustup.rs):
   ```bash
@@ -66,8 +66,8 @@ cargo build --release
 
 This produces two binaries:
 
-- `target/release/zerohunt` — CPU miner
-- `target/release/zerohunt-gpu` — unified CPU + GPU miner
+- `target/release/nullforge` — CPU miner
+- `target/release/nullforge-gpu` — unified CPU + GPU miner
 
 ---
 
@@ -91,16 +91,16 @@ private key.
 
 ```bash
 # via cargo
-cargo run --release --bin zerohunt-gpu -- 9
+cargo run --release --bin nullforge-gpu -- 9
 
 # or the built binary directly
-./target/release/zerohunt-gpu 9
+./target/release/nullforge-gpu 9
 ```
 
-Example run (`zerohunt-gpu 5`):
+Example run (`nullforge-gpu 5`):
 
 ```
-zerohunt-gpu: 8 CPU workers + GPU, finding an address with 5 leading zeros
+nullforge-gpu: 8 CPU workers + GPU, finding an address with 5 leading zeros
 New best [CPU] 1 leading zeros: 0x05e2965cf119765e0428a7936e85277f005ed52c
 New best [CPU] 2 leading zeros: 0x00a402cc0e433c0dc3bc136b7bfb359b79fa19ed
 New best [CPU] 3 leading zeros: 0x000f64871583825134171ea2bae8d719cc4bb61a
@@ -109,7 +109,7 @@ New best [CPU] 5 leading zeros: 0x0₅a82e…5e5c  (0x0(5)a82e…5e5c)
 Found wallet with the most leading zeros:
 Address (raw):      0x00000a82e1c4e5e17d4a162016fb79189cc85e5c
 Address (ERC-8117): 0x0₅a82e1c4e5e17d4a162016fb79189cc85e5c  (0x0(5)a82e1c4e5e17d4a162016fb79189cc85e5c)
-Private Key: [ENCRYPTED to age recipient in scanned_keys.txt; recover offline with `zerohunt-decrypt`]
+Private Key: [ENCRYPTED to age recipient in scanned_keys.txt; recover offline with `nullforge-decrypt`]
 ```
 
 While running, a status line prints every ~5 seconds:
@@ -121,9 +121,9 @@ CPU: 0.18 Mkeys/s | GPU: 0.09 Mkeys/s | total 0.27 Mkeys/s | best: 6
 ### CPU-only miner
 
 ```bash
-cargo run --release --bin zerohunt -- 9
+cargo run --release --bin nullforge -- 9
 # or
-./target/release/zerohunt 9
+./target/release/nullforge 9
 ```
 
 The CPU tool additionally tracks **consecutive repeating characters** after the
@@ -151,7 +151,7 @@ leading zeros (e.g. `0x0000bbbb…`) as a secondary "interestingness" signal.
 The address column uses **ERC-8117 subscript, non-truncated** for ≥ 4 leading
 zeros (this is lossless — `0x0₈` + the remainder reconstructs the full address);
 raw hex below the threshold. The **key column** is, by default,
-`base64(age_encrypt(private_key))` — recover it with `zerohunt-decrypt` (see
+`base64(age_encrypt(private_key))` — recover it with `nullforge-decrypt` (see
 [Secure key output](#secure-key-output)). Only with `--reveal` is it raw hex.
 
 > ⚠️ **The address column is public; the key column is age ciphertext at rest.**
@@ -174,18 +174,18 @@ ever holds the public recipient, so a compromised box (or a leaked
 # Writes the PUBLIC recipient to age-recipient.txt (the miner reads this) and
 # prints the SECRET identity to stdout — save it OFFLINE (password manager /
 # hardware / paper), e.g. straight onto removable media:
-zerohunt-keygen > /Volumes/OFFLINE/age-identity.txt
+nullforge-keygen > /Volumes/OFFLINE/age-identity.txt
 ```
 
 The miner then encrypts automatically — it resolves the recipient from
-`age-recipient.txt` in the working directory, or from `$ZEROHUNT_AGE_RECIPIENT`.
+`age-recipient.txt` in the working directory, or from `$NULLFORGE_AGE_RECIPIENT`.
 With **no** recipient configured it **fails closed** (refuses to run) rather than
 writing plaintext.
 
 **Recover keys later (on the offline machine that holds the secret):**
 
 ```bash
-zerohunt-decrypt --identity /Volumes/OFFLINE/age-identity.txt scanned_keys.txt
+nullforge-decrypt --identity /Volumes/OFFLINE/age-identity.txt scanned_keys.txt
 # -> prints:  <address>	<leading_zeros>	<private_key_hex>
 ```
 
@@ -235,8 +235,8 @@ address bytes, before the result is ever trusted.
 
 Source layout:
 
-- `src/main.rs` — `zerohunt` CPU miner
-- `src/bin/gpu.rs` — `zerohunt-gpu` unified miner host loop + CLI
+- `src/main.rs` — `nullforge` CPU miner
+- `src/bin/gpu.rs` — `nullforge-gpu` unified miner host loop + CLI
 - `src/miner/` — shared state + `report_hit` funnel, CPU worker, GPU driver
 - `src/erc8117.rs` — ERC-8117 formatter
 - `src/keyenc.rs` — key-output encryption (age); `src/bin/keygen.rs` +

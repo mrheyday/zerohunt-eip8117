@@ -1,4 +1,4 @@
-//! zerohunt-keygen: one-time setup for encrypted key output.
+//! nullforge-keygen: one-time setup for encrypted key output.
 //!
 //! Run this on a TRUSTED machine. It:
 //!   * writes the PUBLIC age recipient to `age-recipient.txt` (all the miner
@@ -8,7 +8,7 @@
 //!     paper) and do NOT leave it on the mining box.
 //!
 //! Typical use, saving the secret straight to removable/offline media:
-//!   zerohunt-keygen > /Volumes/OFFLINE/age-identity.txt
+//!   nullforge-keygen > /Volumes/OFFLINE/age-identity.txt
 use age::secrecy::ExposeSecret;
 
 fn main() {
@@ -25,7 +25,7 @@ fn main() {
     // Human-facing guidance on stderr; the secret itself on stdout so it can be
     // redirected to offline media without the warnings getting mixed in.
     eprintln!("=====================================================================");
-    eprintln!(" zerohunt age identity generated.");
+    eprintln!(" nullforge age identity generated.");
     eprintln!();
     eprintln!(" PUBLIC recipient  ->  {path}");
     eprintln!("   {recipient_str}");
@@ -35,7 +35,7 @@ fn main() {
     eprintln!("   * It is the ONLY key that can decrypt mined private keys.");
     eprintln!("   * Do NOT leave it on the mining box. Save to a password manager /");
     eprintln!("     hardware / paper, then clear your terminal scrollback.");
-    eprintln!("   * Decrypt later on an offline box with:  zerohunt-decrypt -i <file>");
+    eprintln!("   * Decrypt later on an offline box with:  nullforge-decrypt -i <file>");
     eprintln!("=====================================================================");
 
     println!("{}", identity.to_string().expose_secret());

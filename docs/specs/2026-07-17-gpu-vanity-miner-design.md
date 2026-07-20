@@ -1,4 +1,4 @@
-# zerohunt GPU vanity miner — design (Metal, Approach A)
+# nullforge GPU vanity miner — design (Metal, Approach A)
 
 **Date:** 2026-07-17
 **Status:** approved (design), pending implementation plan
@@ -30,7 +30,7 @@ entropy. This spec's security model (§2) is built around that requirement.
 
 ## 1. Architecture & integration
 
-- New **independent binary target** `zerohunt-gpu` (`src/bin/gpu.rs`). The working
+- New **independent binary target** `nullforge-gpu` (`src/bin/gpu.rs`). The working
   CPU tool (`src/main.rs`) stays untouched; the `metal` crate dependency is scoped
   to the GPU binary only.
 - Rust host drives Apple Metal compute (via the `metal` crate — gfx-rs/metal-rs,
@@ -114,7 +114,7 @@ Each stage must pass before the next is built:
 - MVP = leading-zero search + full-entropy keys + verified key output.
 - **Out:** Approach B (incremental), in-kernel repeating-char ranking, config
   beyond `target_zeros` (CLI arg, default 8), multi-GPU, checkpointing.
-- CLI: `zerohunt-gpu [target_zeros]` (mirrors the CPU tool's arg handling, incl.
+- CLI: `nullforge-gpu [target_zeros]` (mirrors the CPU tool's arg handling, incl.
   the clean invalid-arg exit).
 
 ## Risks

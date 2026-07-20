@@ -1,4 +1,4 @@
-//! zerohunt-gpu: unified CPU+GPU vanity miner. Mines addresses with the most
+//! nullforge-gpu: unified CPU+GPU vanity miner. Mines addresses with the most
 //! leading zero nibbles across CPU workers and the Metal GPU against one shared
 //! best-tracker, streaming strictly-increasing "new best" records in ERC-8117
 //! notation. Stops at `target_zeros` (default 8) or Ctrl-C.
@@ -13,11 +13,11 @@ use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use tokio::task;
 
-use zerohunt::erc8117;
-use zerohunt::gpu::MetalContext;
-use zerohunt::miner::cpu::cpu_worker;
-use zerohunt::miner::gpu_driver::{run_batches, N_THREADS};
-use zerohunt::miner::shared::MinerShared;
+use nullforge::erc8117;
+use nullforge::gpu::MetalContext;
+use nullforge::miner::cpu::cpu_worker;
+use nullforge::miner::gpu_driver::{run_batches, N_THREADS};
+use nullforge::miner::shared::MinerShared;
 
 /// CPU workers = round(num_cpus * UTILIZATION); ~20% of cores left for the
 /// system + the (I/O-bound) GPU driver thread.
@@ -25,7 +25,7 @@ const UTILIZATION: f64 = 0.80;
 
 #[tokio::main]
 async fn main() {
-    // CLI: `zerohunt-gpu [target_zeros] [--reveal]`, default 8 (mirrors the CPU tool).
+    // CLI: `nullforge-gpu [target_zeros] [--reveal]`, default 8 (mirrors the CPU tool).
     let args: Vec<String> = env::args().skip(1).collect();
     let reveal = args.iter().any(|a| a == "--reveal");
     let target: usize = match args.iter().find(|a| !a.starts_with("--")) {
@@ -34,7 +34,7 @@ async fn main() {
             Ok(n) => n,
             Err(_) => {
                 eprintln!(
-                    "Invalid leading-zero count: {arg:?}\nUsage: zerohunt-gpu [target_zeros] [--reveal]   (positive integer, default 8)"
+                    "Invalid leading-zero count: {arg:?}\nUsage: nullforge-gpu [target_zeros] [--reveal]   (positive integer, default 8)"
                 );
                 std::process::exit(2);
             }
@@ -42,20 +42,20 @@ async fn main() {
     };
 
     // Validate the target range (1..=40 nibbles) and warn on infeasible targets.
-    let target = match zerohunt::target::validate_target(target) {
+    let target = match nullforge::target::validate_target(target) {
         Ok(n) => n,
         Err(e) => {
             eprintln!("ERROR: {e}");
             std::process::exit(2);
         }
     };
-    if let Some(note) = zerohunt::target::feasibility_note(target) {
+    if let Some(note) = nullforge::target::feasibility_note(target) {
         eprintln!("{note}");
     }
 
     // Resolve how found keys are written. Fail closed if no age recipient is
     // configured and --reveal was not passed.
-    let key_sink = match zerohunt::keyenc::resolve_sink(reveal) {
+    let key_sink = match nullforge::keyenc::resolve_sink(reveal) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("ERROR: {e}");
@@ -74,7 +74,7 @@ async fn main() {
 
     let cpu_workers = ((num_cpus::get() as f64) * UTILIZATION).round().max(1.0) as usize;
     println!(
-        "zerohunt-gpu: {cpu_workers} CPU workers + GPU, finding an address with {target} leading zeros"
+        "nullforge-gpu: {cpu_workers} CPU workers + GPU, finding an address with {target} leading zeros"
     );
 
     let file = OpenOptions::new()
@@ -162,7 +162,7 @@ async fn main() {
                 println!("Private Key: {}", hex::encode(best.privkey));
             } else {
                 println!(
-                    "Private Key: [ENCRYPTED to age recipient in scanned_keys.txt; recover offline with `zerohunt-decrypt`]"
+                    "Private Key: [ENCRYPTED to age recipient in scanned_keys.txt; recover offline with `nullforge-decrypt`]"
                 );
             }
         }

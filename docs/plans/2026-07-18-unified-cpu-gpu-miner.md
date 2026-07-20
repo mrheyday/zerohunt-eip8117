@@ -2,21 +2,21 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** One process (`zerohunt-gpu`) that mines Ethereum addresses on the CPU and GPU together against a single shared best-tracker, streaming strictly-increasing "new best" leading-zero records in ERC-8117 notation, stopping at `target_zeros`.
+**Goal:** One process (`nullforge-gpu`) that mines Ethereum addresses on the CPU and GPU together against a single shared best-tracker, streaming strictly-increasing "new best" leading-zero records in ERC-8117 notation, stopping at `target_zeros`.
 
-**Architecture:** A `zerohunt::miner` library module holds the shared state + reporting funnel (`report_hit`), the CPU worker loop, and the GPU driver loop; each is unit-testable in isolation. `src/bin/gpu.rs` is thin wiring: parse args, build shared state, spawn `~80%·num_cpus` CPU workers + one GPU-driver thread + a rate reporter + a Ctrl-C handler, join, print the final summary. Every GPU hit is re-verified against `k256` (hard-abort on mismatch). This is Stage 1 of the spec; it runs on the *current* `mine` kernel and does not change any `.metal` code.
+**Architecture:** A `nullforge::miner` library module holds the shared state + reporting funnel (`report_hit`), the CPU worker loop, and the GPU driver loop; each is unit-testable in isolation. `src/bin/gpu.rs` is thin wiring: parse args, build shared state, spawn `~80%·num_cpus` CPU workers + one GPU-driver thread + a rate reporter + a Ctrl-C handler, join, print the final summary. Every GPU hit is re-verified against `k256` (hard-abort on mismatch). This is Stage 1 of the spec; it runs on the *current* `mine` kernel and does not change any `.metal` code.
 
-**Tech Stack:** Rust, `tokio` (rt-multi-thread, signal), `metal` (Apple Metal compute), `ethers`/`k256` (secp256k1 + address + verification), existing `zerohunt::erc8117` and `zerohunt::gpu` modules.
+**Tech Stack:** Rust, `tokio` (rt-multi-thread, signal), `metal` (Apple Metal compute), `ethers`/`k256` (secp256k1 + address + verification), existing `nullforge::erc8117` and `nullforge::gpu` modules.
 
 ## Global Constraints
 
-- Crate name is `zerohunt`; the library exposes modules as `zerohunt::<mod>`. Binary targets: `zerohunt` (CPU-only, unchanged) and `zerohunt-gpu` (this tool).
+- Crate name is `nullforge`; the library exposes modules as `nullforge::<mod>`. Binary targets: `nullforge` (CPU-only, unchanged) and `nullforge-gpu` (this tool).
 - `rand` is pinned to `0.8` (k256 0.13 via ethers 2.0.14 bounds `SigningKey::random` on rand_core 0.6). Use `rand::rngs::StdRng` + `SeedableRng::from_entropy` (matches `src/main.rs`).
-- ERC-8117 rendering MUST go through `zerohunt::erc8117`: console = `format_both(addr, true)` (both modes, truncated); file column = `format_address(addr, Mode::Subscript, false)` (subscript, non-truncated, lossless).
+- ERC-8117 rendering MUST go through `nullforge::erc8117`: console = `format_both(addr, true)` (both modes, truncated); file column = `format_address(addr, Mode::Subscript, false)` (subscript, non-truncated, lossless).
 - Address string rendering MUST be `format!("{:?}", address)` on an `ethers::types::Address` (lowercase 0x-hex, 42 chars) — identical to `src/main.rs`, so the two tools' leading-zero counts and output match.
 - Leading-zero-nibble count uses the existing byte semantics: full-zero byte → +2, first non-zero byte → `+ (byte.leading_zeros()/4)`, then stop.
 - Every GPU-reported hit MUST be re-derived on the host via `MetalContext::verify_hit` and matched before it is trusted; any mismatch is a hard abort (`std::process::exit(1)`). A GPU bug may waste time but must never emit a bad key.
-- CLI mirrors the CPU tool: `zerohunt-gpu [target_zeros]`, default `8`; non-numeric arg → usage message + `exit(2)`.
+- CLI mirrors the CPU tool: `nullforge-gpu [target_zeros]`, default `8`; non-numeric arg → usage message + `exit(2)`.
 - `UTILIZATION = 0.80`: CPU workers = `max(1, round(num_cpus as f64 * 0.80))`; GPU duty cycle ≈ 80% via post-batch sleep of `(1-0.80)/0.80 · batch_time`.
 
 ## Prerequisites (MUST be satisfied before Task 1)
@@ -48,7 +48,7 @@ The `mine` kernel (`kernels/miner.metal`), `MetalContext::dispatch_mine`, and `s
 - Test: inline `#[cfg(test)] mod tests` in `src/miner/shared.rs`
 
 **Interfaces:**
-- Consumes: `zerohunt::erc8117::{format_address, format_both, Mode}`.
+- Consumes: `nullforge::erc8117::{format_address, format_both, Mode}`.
 - Produces:
   - `enum Engine { Cpu, Gpu }` with `fn label(self) -> &'static str`
   - `struct FoundKey { pub privkey:[u8;32], pub address_str:String, pub zeros:usize }` (derives `Clone`)
@@ -488,7 +488,7 @@ mod tests {
 
     #[test]
     fn threshold_clamps_to_target_when_target_below_floor() {
-        // e.g. `zerohunt-gpu 2`: we must still surface >=2 hits
+        // e.g. `nullforge-gpu 2`: we must still surface >=2 hits
         assert_eq!(gpu_threshold(0, 2), 2);
     }
 }
@@ -609,13 +609,13 @@ git commit -m "feat(miner): GPU driver batch loop + verify-or-abort gate + thres
 - Modify: `src/bin/gpu.rs` (replace the placeholder entirely)
 
 **Interfaces:**
-- Consumes: `zerohunt::miner::shared::{Engine, MinerShared}`, `zerohunt::miner::cpu::cpu_worker`, `zerohunt::miner::gpu_driver::{run_batches, N_THREADS}`, `zerohunt::gpu::MetalContext`, `zerohunt::erc8117`.
-- Produces: the `zerohunt-gpu` binary. No new library symbols.
+- Consumes: `nullforge::miner::shared::{Engine, MinerShared}`, `nullforge::miner::cpu::cpu_worker`, `nullforge::miner::gpu_driver::{run_batches, N_THREADS}`, `nullforge::gpu::MetalContext`, `nullforge::erc8117`.
+- Produces: the `nullforge-gpu` binary. No new library symbols.
 
 - [ ] **Step 1: Replace `src/bin/gpu.rs`**
 
 ```rust
-//! zerohunt-gpu: unified CPU+GPU vanity miner. Mines addresses with the most
+//! nullforge-gpu: unified CPU+GPU vanity miner. Mines addresses with the most
 //! leading zero nibbles across CPU workers and the Metal GPU against one shared
 //! best-tracker, streaming strictly-increasing "new best" records in ERC-8117
 //! notation. Stops at `target_zeros` (default 8) or Ctrl-C.
@@ -629,11 +629,11 @@ use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use tokio::task;
 
-use zerohunt::erc8117;
-use zerohunt::gpu::MetalContext;
-use zerohunt::miner::cpu::cpu_worker;
-use zerohunt::miner::gpu_driver::{run_batches, N_THREADS};
-use zerohunt::miner::shared::MinerShared;
+use nullforge::erc8117;
+use nullforge::gpu::MetalContext;
+use nullforge::miner::cpu::cpu_worker;
+use nullforge::miner::gpu_driver::{run_batches, N_THREADS};
+use nullforge::miner::shared::MinerShared;
 
 /// CPU workers = round(num_cpus * UTILIZATION); ~20% of cores left for the
 /// system + the (I/O-bound) GPU driver thread.
@@ -641,14 +641,14 @@ const UTILIZATION: f64 = 0.80;
 
 #[tokio::main]
 async fn main() {
-    // CLI: `zerohunt-gpu [target_zeros]`, default 8 (mirrors the CPU tool).
+    // CLI: `nullforge-gpu [target_zeros]`, default 8 (mirrors the CPU tool).
     let target: usize = match env::args().nth(1) {
         None => 8,
         Some(arg) => match arg.trim().parse() {
             Ok(n) => n,
             Err(_) => {
                 eprintln!(
-                    "Invalid leading-zero count: {arg:?}\nUsage: zerohunt-gpu [target_zeros]   (positive integer, default 8)"
+                    "Invalid leading-zero count: {arg:?}\nUsage: nullforge-gpu [target_zeros]   (positive integer, default 8)"
                 );
                 std::process::exit(2);
             }
@@ -657,7 +657,7 @@ async fn main() {
 
     let cpu_workers = ((num_cpus::get() as f64) * UTILIZATION).round().max(1.0) as usize;
     println!(
-        "zerohunt-gpu: {cpu_workers} CPU workers + GPU, finding an address with {target} leading zeros"
+        "nullforge-gpu: {cpu_workers} CPU workers + GPU, finding an address with {target} leading zeros"
     );
 
     let file = OpenOptions::new()
@@ -749,14 +749,14 @@ async fn main() {
 
 - [ ] **Step 2: Build the binary**
 
-Run: `cargo build --bin zerohunt-gpu`
+Run: `cargo build --bin nullforge-gpu`
 Expected: compiles cleanly (warnings from transitive deps are fine).
 
 - [ ] **Step 3: Smoke-run to a small target and confirm output shape**
 
 Run (finds quickly, low target):
 ```bash
-cd "$(git rev-parse --show-toplevel)" && rm -f scanned_keys.txt && timeout 60 ./target/debug/zerohunt-gpu 4; echo "exit: $?"
+cd "$(git rev-parse --show-toplevel)" && rm -f scanned_keys.txt && timeout 60 ./target/debug/nullforge-gpu 4; echo "exit: $?"
 ```
 Expected: at least one `New best [CPU|GPU] N leading zeros: 0x0₄…  (0x0(4)…)` line; a final `Found wallet …` block with raw + ERC-8117 + private key; and `scanned_keys.txt` containing a subscript, non-truncated address column. (Exit 0 on natural finish at 4; 124 if `timeout` fired — re-run with a lower target if so.)
 
@@ -775,7 +775,7 @@ git commit -m "feat(gpu-bin): unified CPU+GPU miner host loop + CLI + ERC-8117 o
 - Modify: `tests/gpu_stages.rs` (append a new test)
 
 **Interfaces:**
-- Consumes: `zerohunt::gpu::MetalContext`, `zerohunt::miner::shared::MinerShared`, `zerohunt::miner::gpu_driver::run_batches`.
+- Consumes: `nullforge::gpu::MetalContext`, `nullforge::miner::shared::MinerShared`, `nullforge::miner::gpu_driver::run_batches`.
 
 - [ ] **Step 1: Write the failing (or device-skipped) test**
 
@@ -789,9 +789,9 @@ Append to `tests/gpu_stages.rs`:
 fn gpu_driver_finds_and_reports_low_target() {
     use std::sync::Arc;
     use std::time::Instant;
-    use zerohunt::gpu::MetalContext;
-    use zerohunt::miner::gpu_driver::{run_batches, N_THREADS};
-    use zerohunt::miner::shared::MinerShared;
+    use nullforge::gpu::MetalContext;
+    use nullforge::miner::gpu_driver::{run_batches, N_THREADS};
+    use nullforge::miner::shared::MinerShared;
 
     let ctx = MetalContext::new();
 

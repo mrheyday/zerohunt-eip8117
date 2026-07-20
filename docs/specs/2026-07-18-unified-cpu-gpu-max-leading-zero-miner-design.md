@@ -20,13 +20,13 @@ Success = (a) higher sustained throughput than either engine alone, and
 only**, matching the stated goal ("each higher leading zeros than the one
 before"). It intentionally drops `main.rs`'s secondary "repeating characters in
 order" tiebreak — the GPU `mine` kernel reports only the zero count, and the
-goal is leading zeros. The pure-CPU `zerohunt` keeps its existing behavior.
+goal is leading zeros. The pure-CPU `nullforge` keeps its existing behavior.
 
 ## Measured baseline (Apple M1 Pro — 10 CPU cores, 16-core GPU, release build)
 
 | Engine | Rate | How measured |
 |---|---|---|
-| CPU, all 10 cores | ~180,000 keys/s | `zerohunt 99` printed rate |
+| CPU, all 10 cores | ~180,000 keys/s | `nullforge 99` printed rate |
 | GPU, current kernel | ~90,000 keys/s | timing `derive_address_gpu` |
 
 Two findings drive this design:
@@ -54,8 +54,8 @@ optimizations below, which are Metal-version-agnostic.
 
 ## Architecture
 
-Single binary `zerohunt-gpu` (`src/bin/gpu.rs`), keeping the existing tokio
-runtime. The pure-CPU `zerohunt` (`src/main.rs`) stays as-is for
+Single binary `nullforge-gpu` (`src/bin/gpu.rs`), keeping the existing tokio
+runtime. The pure-CPU `nullforge` (`src/main.rs`) stays as-is for
 GPU-less / quick runs.
 
 Threads:
@@ -89,7 +89,7 @@ on Apple Silicon, where the GPU is shared) at a small throughput cost.
 
 ## Components (library-first, so each unit is testable in isolation)
 
-- **`zerohunt::miner::shared`** — the unified core, GPU-free and thread-free to test:
+- **`nullforge::miner::shared`** — the unified core, GPU-free and thread-free to test:
   - `MinerShared` (`Arc`): `target: usize`, `best_zeros: AtomicUsize`,
     `best: Mutex<Option<FoundKey>>`, `file: Mutex<File>`,
     `cpu_keys/gpu_keys: AtomicU64`, `stop: AtomicBool`, `start: Instant`.
@@ -98,9 +98,9 @@ on Apple Silicon, where the GPU is shared) at a small throughput cost.
     both engines call. Fast-path `zeros <= best_zeros → return`; else lock,
     re-check, update, write file (ERC-8117), print (ERC-8117), trip `stop` at
     target.
-- **`zerohunt::miner::cpu`** — `cpu_worker(shared)`: the random-key loop from
+- **`nullforge::miner::cpu`** — `cpu_worker(shared)`: the random-key loop from
   `main.rs`, thin over `report_hit`.
-- **`zerohunt::miner::gpu_driver`** — `run_batches(ctx, shared, seeds, params)`:
+- **`nullforge::miner::gpu_driver`** — `run_batches(ctx, shared, seeds, params)`:
   the dispatch→verify→report loop. Verification decision is a **returning**
   function (`Result`), so the abort path is testable; the binary turns `Err`
   into `exit(1)`.
@@ -176,9 +176,9 @@ modernization but zero crypto speedup — explicitly deferred).
   is trusted.** Mismatch ⇒ hard-abort `exit(1)` with the privkey + expected/got
   address. A GPU bug can waste time but can never emit a bad key. This invariant
   is preserved through all three optimization stages.
-- No Metal device → friendly message + `exit(1)` suggesting CPU-only `zerohunt`
+- No Metal device → friendly message + `exit(1)` suggesting CPU-only `nullforge`
   (no panic).
-- Arg parse mirrors the CPU tool: `zerohunt-gpu [target_zeros]`, default 8,
+- Arg parse mirrors the CPU tool: `nullforge-gpu [target_zeros]`, default 8,
   non-numeric → usage + `exit(2)`.
 - File-open failure → error + exit.
 - Batch saturation (hit_count > cap) → warn, continue with clamped hits.

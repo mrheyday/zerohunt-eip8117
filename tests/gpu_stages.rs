@@ -1,4 +1,4 @@
-use zerohunt::gpu::MetalContext;
+use nullforge::gpu::MetalContext;
 
 #[test]
 fn echo_kernel_doubles_thread_id() {
@@ -270,11 +270,11 @@ fn mine_finds_and_verifies_low_threshold() {
 /// tests in this file (runs on the Metal device present in CI/dev machines).
 #[test]
 fn gpu_driver_finds_and_reports_low_target() {
+    use nullforge::gpu::MetalContext;
+    use nullforge::miner::gpu_driver::{run_batches, N_THREADS};
+    use nullforge::miner::shared::MinerShared;
     use std::sync::Arc;
     use std::time::Instant;
-    use zerohunt::gpu::MetalContext;
-    use zerohunt::miner::gpu_driver::{run_batches, N_THREADS};
-    use zerohunt::miner::shared::MinerShared;
 
     let ctx = MetalContext::new();
 
@@ -284,7 +284,7 @@ fn gpu_driver_finds_and_reports_low_target() {
         2,
         file.reopen().unwrap(),
         Instant::now(),
-        zerohunt::keyenc::KeySink::RevealPlaintext,
+        nullforge::keyenc::KeySink::RevealPlaintext,
     ));
 
     // Deterministic distinct seeds (content is irrelevant to correctness).

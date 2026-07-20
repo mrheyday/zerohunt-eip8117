@@ -18,8 +18,8 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /usr/src/app/target/release/zerohunt /usr/local/bin/zerohunt
+COPY --from=builder /usr/src/app/target/release/nullforge /usr/local/bin/nullforge
 
 WORKDIR /app
 
-ENTRYPOINT ["zerohunt"]
+ENTRYPOINT ["nullforge"]

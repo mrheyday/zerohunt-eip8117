@@ -2097,6 +2097,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nullforge"
+version = "0.1.0"
+dependencies = [
+ "age",
+ "base64 0.22.1",
+ "ethers",
+ "metal",
+ "num_cpus",
+ "rand 0.8.7",
+ "tempfile",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "num-bigint"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4071,21 +4086,6 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "synstructure",
-]
-
-[[package]]
-name = "zerohunt"
-version = "0.1.0"
-dependencies = [
- "age",
- "base64 0.22.1",
- "ethers",
- "metal",
- "num_cpus",
- "rand 0.8.7",
- "tempfile",
- "tokio",
- "zeroize",
 ]
 
 [[package]]

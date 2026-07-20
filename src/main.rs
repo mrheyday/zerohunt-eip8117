@@ -1,6 +1,9 @@
 use ethers::core::k256::ecdsa::SigningKey;
 use ethers::signers::{Signer, Wallet};
 use ethers::utils::{hex, secret_key_to_address};
+use nullforge::erc8117;
+use nullforge::keyenc;
+use nullforge::target;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use std::env;
@@ -11,9 +14,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::task;
-use zerohunt::erc8117;
-use zerohunt::keyenc;
-use zerohunt::target;
 use zeroize::Zeroize;
 
 /// Iterations each worker accumulates before flushing to the shared
@@ -32,7 +32,7 @@ async fn main() {
             Ok(n) => n,
             Err(_) => {
                 eprintln!(
-                    "Invalid leading-zero count: {arg:?}\nUsage: zerohunt [max_zeros] [--reveal]   (positive integer, default 8)"
+                    "Invalid leading-zero count: {arg:?}\nUsage: nullforge [max_zeros] [--reveal]   (positive integer, default 8)"
                 );
                 std::process::exit(2);
             }
@@ -297,7 +297,7 @@ async fn main() {
             println!("Private Key: {}", hex::encode(wallet.signer().to_bytes()));
         } else {
             println!(
-                "Private Key: [ENCRYPTED to age recipient in scanned_keys.txt; recover offline with `zerohunt-decrypt`]"
+                "Private Key: [ENCRYPTED to age recipient in scanned_keys.txt; recover offline with `nullforge-decrypt`]"
             );
         }
     } else {
