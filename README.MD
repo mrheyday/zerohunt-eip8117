@@ -329,20 +329,22 @@ Measured on an Apple M1 Pro (10 CPU cores, 16-core GPU), release build:
 | Engine | Throughput |
 |---|---|
 | CPU (all cores) | ~180,000 keys/s |
-| GPU (current kernel) | ~90,000 keys/s |
+| GPU (Metal) | ~25,000,000 keys/s |
 
-The GPU is currently **slower than the CPU** because `dispatch_mine` recompiles
-the Metal kernel on every batch, so the GPU spends most of its time compiling
-rather than mining. Caching the compiled pipeline is the top planned fix; deeper
-GPU speedups (a fixed-base comb table for `k·G` and a per-thread batched modular
-inverse) are specced in `docs/`. Expected effort for N leading zeros scales as
-16ᴺ, so each additional zero is ~16× more work.
+The GPU is now the **dominant engine** (~140× the CPU), after two host-side fixes:
+the `mine` compute pipeline is compiled **once** and reused (it was recompiled on
+every batch), and dispatch uses `dispatch_threads` with a full-width threadgroup
+instead of one thread per threadgroup (which idled ~32× of the GPU's SIMD width).
+Deeper GPU speedups (a fixed-base comb table for `k·G` and a per-thread batched
+modular inverse) are specced in `docs/`. Expected effort for N leading zeros
+scales as 16ᴺ, so each additional zero is ~16× more work.
 
 ---
 
 ## Roadmap
 
-- Cache the compiled Metal pipeline in `MetalContext` (biggest near-term GPU win).
+- ~~Cache the compiled Metal pipeline in `MetalContext`~~ · ~~fix threadgroup
+  occupancy (`dispatch_threads`)~~ — **done** (GPU ~0.09 → ~25 Mkeys/s).
 - Stage 2: fixed-base comb table for `k·G`.
 - Stage 3: per-thread batched modular inverse (Montgomery's trick).
 
