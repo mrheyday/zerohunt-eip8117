@@ -117,15 +117,27 @@ __attribute__((noinline)) jpoint j_add(jpoint P, jpoint Q) {
     return R;
 }
 
-// R = k*G via MSB-first double-and-add, then Jacobian -> affine.
-__attribute__((noinline)) void scalarmul(fe k, thread fe& outx, thread fe& outy) {
-    jpoint R = j_infinity();
+// The secp256k1 generator point G as a Jacobian point (Z=1). Shared by
+// scalarmul_jacobian below and the incremental-walk kernels in miner.metal,
+// which need G on its own to add into a running point each step.
+inline jpoint g_point() {
     jpoint G;
     for (int i = 0; i < 8; i++) {
         G.X.v[i] = GX[i];
         G.Y.v[i] = GY[i];
     }
     G.Z = fe_from_u32(1u);
+    return G;
+}
+
+// R = k*G via MSB-first double-and-add, left in Jacobian coordinates (no
+// final inversion). Callers that only need affine x,y should use
+// `scalarmul` below; callers building an incremental walk (miner.metal) want
+// the Jacobian point directly so they can keep adding G without paying for
+// repeated inversions.
+__attribute__((noinline)) jpoint scalarmul_jacobian(fe k) {
+    jpoint R = j_infinity();
+    jpoint G = g_point();
 
 #pragma clang loop unroll(disable)
     for (int bit = 255; bit >= 0; bit--) {
@@ -136,7 +148,12 @@ __attribute__((noinline)) void scalarmul(fe k, thread fe& outx, thread fe& outy)
             R = j_add(R, G);
         }
     }
+    return R;
+}
 
+// R = k*G, converted to affine (x,y). Thin wrapper over scalarmul_jacobian.
+__attribute__((noinline)) void scalarmul(fe k, thread fe& outx, thread fe& outy) {
+    jpoint R = scalarmul_jacobian(k);
     fe zinv = fe_inv(R.Z);
     fe zinv2 = fe_mul(zinv, zinv);
     fe zinv3 = fe_mul(zinv2, zinv);

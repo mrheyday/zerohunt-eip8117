@@ -154,6 +154,99 @@ fn field_ops_match_host_mod_p() {
 }
 
 // ---------------------------------------------------------------------------
+// scalar_add_small (the incremental-walk's `(base+it) mod n` arithmetic):
+// GPU vs U256 host reference, including the explicit n-wrap boundary.
+// ---------------------------------------------------------------------------
+
+fn secp_n() -> U256 {
+    U256::from_str_radix(
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141",
+        16,
+    )
+    .unwrap()
+}
+
+#[test]
+fn scalar_add_small_matches_host_mod_n() {
+    let n = secp_n();
+    let ctx = MetalContext::new();
+
+    let bases = vec![
+        U256::from(1u32),
+        U256::from(1_000_000u32),
+        n - U256::from(2u32), // n-wrap boundary case
+        n - U256::from(2u32), // repeated: verify determinism
+    ];
+    let its = vec![5u32, 300u32, 0u32, 4u32];
+
+    let gpu = ctx.run_scalar_add_mod_n(&bases, &its);
+    for (i, (b, it)) in bases.iter().zip(its.iter()).enumerate() {
+        let want = addmod(*b, U256::from(*it), n);
+        assert_eq!(gpu[i], want, "scalar_add_small mismatch case {i}: base={b} it={it}");
+    }
+
+    // Explicit assertion that the wrap case actually wrapped (didn't just
+    // happen to equal the unwrapped sum), so this test would fail loudly if
+    // the conditional subtraction were missing or wrong.
+    // (n-2) + 4 = n+2, which mod n = 2
+    let wrapped = ctx.run_scalar_add_mod_n(&[n - U256::from(2u32)], &[4u32])[0];
+    assert_eq!(wrapped, U256::from(2u32), "n-2 + 4 mod n should wrap to 2");
+}
+
+// ---------------------------------------------------------------------------
+// Incremental Jacobian walk (Approach B core loop): GPU vs k256, including
+// the explicit n-wrap boundary.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn incremental_walk_matches_k256() {
+    use ethers::core::k256::ecdsa::SigningKey;
+    use ethers::utils::secret_key_to_address;
+    let n = secp_n();
+    let ctx = MetalContext::new();
+
+    let mut bases: Vec<[u8; 32]> = vec![
+        hex_to_32("0000000000000000000000000000000000000000000000000000000000000001"),
+        hex_to_32("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+    ];
+    // Explicit n-wrap boundary: base = n-2, walk 4 steps (crosses n at it=2).
+    let mut n_minus_2 = [0u8; 32];
+    (n - U256::from(2u32)).to_big_endian(&mut n_minus_2);
+    bases.push(n_minus_2);
+
+    let iters = 4u32;
+    let gpu = ctx.run_mine_incremental_raw(&bases, iters);
+
+    for (bi, base_bytes) in bases.iter().enumerate() {
+        let base = U256::from_big_endian(base_bytes);
+        for it in 0..iters {
+            let want_scalar = addmod(base, U256::from(it), n);
+            if want_scalar.is_zero() {
+                // Degenerate point at infinity: GPU must emit the all-zero
+                // sentinel, not a fabricated address.
+                assert_eq!(gpu[bi][it as usize].0, [0u8; 32], "base {bi} it {it}: expected zero-sentinel privkey");
+                assert_eq!(gpu[bi][it as usize].1, [0u8; 20], "base {bi} it {it}: expected zero-sentinel address");
+                continue;
+            }
+            let mut want_bytes = [0u8; 32];
+            want_scalar.to_big_endian(&mut want_bytes);
+            let sk = SigningKey::from_bytes((&want_bytes).into()).expect("canonical scalar");
+            let want_addr = secret_key_to_address(&sk);
+
+            let (gpu_priv, gpu_addr) = gpu[bi][it as usize];
+            assert_eq!(gpu_priv, want_bytes, "base {bi} it {it}: privkey mismatch");
+            assert_eq!(&gpu_addr[..], want_addr.as_bytes(), "base {bi} it {it}: address mismatch");
+        }
+    }
+
+    // The n-wrap base (index 2) must actually wrap within the tested window:
+    // n-2, n-1, 0 (degenerate), 1 -- assert the degenerate slot is exactly
+    // it=2, proving the boundary was really exercised.
+    let base = U256::from_big_endian(&bases[2]);
+    assert!(addmod(base, U256::from(2u32), n).is_zero(), "test setup: expected wrap at it=2");
+}
+
+// ---------------------------------------------------------------------------
 // secp256k1 EC scalar-mult (k*G -> affine pubkey) GPU vs k256 cross-check.
 // ---------------------------------------------------------------------------
 
@@ -247,6 +340,32 @@ fn mine_finds_and_verifies_low_threshold() {
         .collect();
     let base: Vec<u64> = vec![0; seeds.len()];
     let hits = ctx.dispatch_mine(&seeds, &base, 4096, 2); // >=2 leading zero nibbles
+    assert!(!hits.is_empty(), "should find >=2-zero addresses");
+    for h in &hits {
+        assert!(ctx.verify_hit(h.privkey, h.address), "hit failed host re-derivation");
+        assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mine_incremental kernel (Approach B): same threshold-gated hit-buffer wire
+// format as `mine`, cross-checked via the same host re-derivation gate.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mine_incremental_finds_and_verifies_low_threshold() {
+    let ctx = MetalContext::new();
+    let seeds: Vec<[u8; 32]> = (0..256)
+        .map(|i| {
+            let mut s = [0u8; 32];
+            s[0] = (i & 0xff) as u8;
+            s[1] = (i >> 8) as u8;
+            s[31] = 0x22;
+            s
+        })
+        .collect();
+    let base: Vec<u64> = vec![0; seeds.len()];
+    let hits = ctx.dispatch_mine_incremental(&seeds, &base, 4096, 2); // >=2 leading zero nibbles
     assert!(!hits.is_empty(), "should find >=2-zero addresses");
     for h in &hits {
         assert!(ctx.verify_hit(h.privkey, h.address), "hit failed host re-derivation");

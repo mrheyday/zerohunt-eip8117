@@ -169,18 +169,37 @@ legacy system fails safely instead of sending to the wrong address.
 For each candidate:
 
 1. **Key derivation.** CPU: a random 32-byte key from a per-thread ChaCha CSPRNG
-   (full OS entropy). GPU: `keccak256(seed ‖ counter)` with a full-entropy
-   per-thread seed (a random-oracle output → full ~256-bit entropy).
-2. **Public key.** secp256k1 scalar multiply `k·G`.
+   (full OS entropy). GPU: one `keccak256(seed ‖ base_counter)` per thread per
+   batch (a full-entropy random-oracle output), then each candidate key in
+   that batch is `(base + offset) mod n` for `offset` in the batch window —
+   see "Approach B" below.
+2. **Public key.** One secp256k1 scalar multiply `base·G` per thread per
+   batch, then a cheap Jacobian point addition (`+G`) per subsequent candidate
+   in the batch — not a full scalar multiply per key.
 3. **Address.** `keccak256(x ‖ y)[12..32]` (the standard Ethereum derivation).
 4. **Score.** Count leading zero nibbles; report if it beats the current best.
 
 The GPU path is implemented in Metal Shading Language (`kernels/`):
 `keccak.metal` (Keccak-256), `field.metal` (secp256k1 field arithmetic),
-`ec.metal` (Jacobian scalar multiply), and `miner.metal` (the full
-derive→address→count `mine` kernel). The Rust host (`src/gpu/`) dispatches
-batches and **re-derives every reported hit with `k256`**, comparing all 20
-address bytes, before the result is ever trusted.
+`ec.metal` (Jacobian scalar multiply/add), and `miner.metal` (the
+derive→address→count kernels, including the default `mine_incremental`
+kernel and the reference/fallback `mine` kernel). The Rust host (`src/gpu/`)
+dispatches batches and **re-derives every reported hit with `k256`**,
+comparing all 20 address bytes, before the result is ever trusted.
+
+**Approach B (incremental EC, default since `mine_incremental`).** Rather than
+an independent full scalar multiply per candidate key (Approach A, still
+available as `mine`/`dispatch_mine`), each GPU thread does one scalar multiply
+per *batch* and walks the rest of the batch via point additions — about 15x
+fewer field operations per candidate. This is a different, and weaker,
+security model than Approach A's "every key an independent oracle output":
+keys within one batch are affinely related (their difference is public), so
+recovering one doesn't help without solving discrete log, but the
+correlation set is bounded to a batch instead of empty. See
+`docs/specs/2026-07-19-gpu-incremental-ec-miner-design.md` for the full
+cost model and security-model writeup — this codebase exists because a
+previous vanity miner (`profanity`) shipped a weak model without disclosing
+it, so this tradeoff is documented rather than left implicit.
 
 Source layout:
 
