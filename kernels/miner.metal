@@ -52,6 +52,62 @@ inline bool scalar_in_range(thread const fe& k) {
     return false; // k == SECP_N is out of range (n is not a valid scalar)
 }
 
+// True iff r >= SECP_N (both 8-limb little-endian), i.e. r is not yet reduced
+// into the canonical [0, SECP_N) range.
+inline bool scalar_ge_n(thread const fe& r) {
+    for (int i = 7; i >= 0; i--) {
+        if (r.v[i] != SECP_N[i]) {
+            return r.v[i] > SECP_N[i];
+        }
+    }
+    return true; // r == SECP_N
+}
+
+// (base + it) mod SECP_N, via a single conditional subtraction. Valid
+// whenever base < SECP_N (a scalar_in_range-guarded base) and
+// base + it < 2*SECP_N -- true for every `it` this codebase's batch sizes
+// use (a few hundred at most; SECP_N > 2^255), so at most one subtraction is
+// ever needed. Used to derive an incremental-walk candidate's private key
+// from its batch base without a full scalar multiplication.
+inline fe scalar_add_small(thread const fe& base, uint it) {
+    fe r = base;
+    ulong carry = (ulong)it;
+    for (int i = 0; i < 8 && carry != 0; i++) {
+        ulong s = (ulong)r.v[i] + carry;
+        r.v[i] = (uint)s;
+        carry = s >> 32;
+    }
+    if (scalar_ge_n(r)) {
+        long borrow = 0;
+        for (int i = 0; i < 8; i++) {
+            long d = (long)r.v[i] - (long)SECP_N[i] - borrow;
+            if (d < 0) {
+                d += 0x100000000L;
+                borrow = 1;
+            } else {
+                borrow = 0;
+            }
+            r.v[i] = (uint)d;
+        }
+    }
+    return r;
+}
+
+// Test-only: applies scalar_add_small to the gid-th (base, it) pair.
+kernel void scalar_add_mod_n_test(device const uint* bases [[buffer(0)]],
+                                   device const uint* its   [[buffer(1)]],
+                                   device uint* out         [[buffer(2)]],
+                                   uint gid [[thread_position_in_grid]]) {
+    fe base;
+    for (int i = 0; i < 8; i++) {
+        base.v[i] = bases[gid * 8 + i];
+    }
+    fe r = scalar_add_small(base, its[gid]);
+    for (int i = 0; i < 8; i++) {
+        out[gid * 8 + i] = r.v[i];
+    }
+}
+
 // privkey = keccak256(seed[32] || counter_le8), returned as an (unreduced --
 // see scalar_in_range) field element. Caller applies the scalar-range guard.
 inline fe derive_privkey(thread const uchar* seed, ulong counter) {
@@ -78,6 +134,56 @@ inline void pubkey_to_address(fe x, fe y, thread uchar* out20) {
     keccak256(xy, 64, digest);
     for (uint i = 0; i < 20; i++) {
         out20[i] = digest[12 + i];
+    }
+}
+
+// Test-only: given raw 256-bit bases (not keccak-derived) and a shared
+// `iters` count, walk `iters` incremental points per base and emit every
+// candidate's (privkey, address) pair unconditionally (no threshold gate).
+// Lets tests exercise the walk arithmetic -- including deliberately chosen
+// bases near the n-wrap boundary -- without needing a keccak preimage.
+// A degenerate point (base+it == 0 mod n, i.e. Jacobian Z == 0) writes an
+// all-zero privkey/address pair, which the host test asserts never occurs
+// for the bases it chooses (or explicitly checks for, at the wrap case).
+kernel void mine_incremental_raw_test(device const uint* bases [[buffer(0)]],
+                                       constant uint& iters     [[buffer(1)]],
+                                       device uchar* out_priv   [[buffer(2)]],
+                                       device uchar* out_addr   [[buffer(3)]],
+                                       uint gid [[thread_position_in_grid]]) {
+    fe base;
+    for (int i = 0; i < 8; i++) {
+        base.v[i] = bases[gid * 8 + i];
+    }
+
+    jpoint P = scalarmul_jacobian(base);
+    jpoint G = g_point();
+
+    for (uint it = 0; it < iters; it++) {
+        if (it > 0) {
+            P = j_add(P, G);
+        }
+        uint out = gid * iters + it;
+
+        if (fe_is_zero(P.Z)) {
+            for (uint i = 0; i < 32; i++) out_priv[out * 32 + i] = 0;
+            for (uint i = 0; i < 20; i++) out_addr[out * 20 + i] = 0;
+            continue;
+        }
+
+        fe zinv = fe_inv(P.Z);
+        fe zinv2 = fe_mul(zinv, zinv);
+        fe zinv3 = fe_mul(zinv2, zinv);
+        fe x = fe_mul(P.X, zinv2);
+        fe y = fe_mul(P.Y, zinv3);
+
+        thread uchar addr[20];
+        pubkey_to_address(x, y, addr);
+        for (uint i = 0; i < 20; i++) out_addr[out * 20 + i] = addr[i];
+
+        fe priv = scalar_add_small(base, it);
+        thread uchar privBytes[32];
+        fe_to_bytes_be(priv, privBytes);
+        for (uint i = 0; i < 32; i++) out_priv[out * 32 + i] = privBytes[i];
     }
 }
 
@@ -187,6 +293,86 @@ kernel void mine(device const uchar* seeds [[buffer(0)]],
         if (zeros < threshold) {
             continue;
         }
+
+        uint idx = atomic_fetch_add_explicit(hit_count, 1u, memory_order_relaxed);
+        if (idx >= MAX_HITS) {
+            continue; // batch saturated; drop (host clamps its read too)
+        }
+
+        thread uchar privBytes[32];
+        fe_to_bytes_be(priv, privBytes);
+        uint out = idx * HIT_STRIDE;
+        for (uint i = 0; i < 32; i++) {
+            hits[out + i] = privBytes[i];
+        }
+        for (uint i = 0; i < 20; i++) {
+            hits[out + 32 + i] = addr[i];
+        }
+        hits[out + 52] = (uchar)zeros;
+        for (uint i = 53; i < HIT_STRIDE; i++) {
+            hits[out + i] = 0;
+        }
+    }
+}
+
+// Approach B: one thread per (seed, base_counter). Derives a single batch
+// base scalar (exactly like `mine`'s per-candidate derive_privkey, but
+// called once per batch instead of once per candidate), computes base*G
+// once, then walks `iters` candidates via cheap Jacobian point additions
+// instead of `iters` full scalar multiplications. Emits any candidate with
+// >= threshold leading-zero nibbles to the same bounded `hits` buffer `mine`
+// uses (identical wire format), so host dispatch code is shared.
+//
+// NOTE: placed after `mine` (rather than immediately after
+// `mine_incremental_raw_test` as the plan's snippet ordering suggested) so
+// that `leading_zero_nibbles`/`HIT_STRIDE`/`MAX_HITS` -- declared between
+// `mine_incremental_raw_test` and `mine` above -- are already in scope;
+// Metal, like C/C++, requires a symbol's declaration to precede its use
+// within a translation unit.
+kernel void mine_incremental(device const uchar* seeds [[buffer(0)]],
+                              device const ulong* base_counters [[buffer(1)]],
+                              constant uint& iters [[buffer(2)]],
+                              constant uint& threshold [[buffer(3)]],
+                              device atomic_uint* hit_count [[buffer(4)]],
+                              device uchar* hits [[buffer(5)]],
+                              uint gid [[thread_position_in_grid]]) {
+    thread uchar seed[32];
+    for (uint i = 0; i < 32; i++) {
+        seed[i] = seeds[gid * 32 + i];
+    }
+    ulong base_counter = base_counters[gid];
+
+    fe base = derive_privkey(seed, base_counter);
+    if (!scalar_in_range(base)) {
+        return; // batch-base guard miss (probability ~2^-128): skip whole batch
+    }
+
+    jpoint P = scalarmul_jacobian(base);
+    jpoint G = g_point();
+
+    for (uint it = 0; it < iters; it++) {
+        if (it > 0) {
+            P = j_add(P, G);
+        }
+        if (fe_is_zero(P.Z)) {
+            continue; // base+it == 0 (mod n): invalid scalar, skip candidate
+        }
+
+        fe zinv = fe_inv(P.Z);
+        fe zinv2 = fe_mul(zinv, zinv);
+        fe zinv3 = fe_mul(zinv2, zinv);
+        fe x = fe_mul(P.X, zinv2);
+        fe y = fe_mul(P.Y, zinv3);
+
+        thread uchar addr[20];
+        pubkey_to_address(x, y, addr);
+
+        uint zeros = leading_zero_nibbles(addr);
+        if (zeros < threshold) {
+            continue;
+        }
+
+        fe priv = scalar_add_small(base, it);
 
         uint idx = atomic_fetch_add_explicit(hit_count, 1u, memory_order_relaxed);
         if (idx >= MAX_HITS) {

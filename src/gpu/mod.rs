@@ -210,6 +210,175 @@ impl MetalContext {
         limbs_to_u256(&out)
     }
 
+    /// Test-only: apply `scalar_add_small` (the incremental-walk's
+    /// `(base + it) mod n` arithmetic) on the GPU for each `(base, it)` pair
+    /// via `kernels/miner.metal`'s `scalar_add_mod_n_test`, returning the
+    /// result as a `U256`. `base` must already be reduced mod n (< n).
+    pub fn run_scalar_add_mod_n(&self, bases: &[U256], its: &[u32]) -> Vec<U256> {
+        assert_eq!(bases.len(), its.len(), "bases/its length mismatch");
+        let n = bases.len();
+        let mut base_limbs = vec![0u32; n * 8];
+        for (i, b) in bases.iter().enumerate() {
+            base_limbs[i * 8..i * 8 + 8].copy_from_slice(&u256_to_limbs(*b));
+        }
+
+        let keccak_src = include_str!("../../kernels/keccak.metal");
+        let field_src = include_str!("../../kernels/field.metal");
+        let ec_src = include_str!("../../kernels/ec.metal");
+        let miner_src = include_str!("../../kernels/miner.metal");
+        let src = format!("{keccak_src}\n{field_src}\n{ec_src}\n{miner_src}");
+
+        let lib = self
+            .device
+            .new_library_with_source(&src, &CompileOptions::new())
+            .expect("kernel compile failed");
+        let func = lib
+            .get_function("scalar_add_mod_n_test", None)
+            .expect("entry not found");
+        let pipeline = self
+            .device
+            .new_compute_pipeline_state_with_function(&func)
+            .expect("pipeline");
+
+        let base_buf = self.device.new_buffer_with_data(
+            base_limbs.as_ptr() as *const std::ffi::c_void,
+            (base_limbs.len() * std::mem::size_of::<u32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let its_buf = self.device.new_buffer_with_data(
+            its.as_ptr() as *const std::ffi::c_void,
+            std::mem::size_of_val(its) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let out_len = n * 8;
+        let out_buf = self.device.new_buffer(
+            (out_len * std::mem::size_of::<u32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&pipeline);
+        enc.set_buffer(0, Some(&base_buf), 0);
+        enc.set_buffer(1, Some(&its_buf), 0);
+        enc.set_buffer(2, Some(&out_buf), 0);
+        enc.dispatch_thread_groups(MTLSize::new(n as u64, 1, 1), MTLSize::new(1, 1, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let ptr = out_buf.contents() as *const u32;
+        let limbs = unsafe { std::slice::from_raw_parts(ptr, out_len) };
+        (0..n)
+            .map(|i| {
+                let mut l = [0u32; 8];
+                l.copy_from_slice(&limbs[i * 8..i * 8 + 8]);
+                limbs_to_u256(&l)
+            })
+            .collect()
+    }
+
+    /// Test-only: run the incremental Jacobian walk (Approach B's core loop)
+    /// from `iters` explicit 256-bit `bases` (not keccak-derived), via
+    /// `kernels/miner.metal`'s `mine_incremental_raw_test`. Returns, per base,
+    /// `iters` `(privkey, address)` pairs for `(base+0)*G .. (base+iters-1)*G`.
+    /// Lets tests target exact scalar values (e.g. the n-wrap boundary).
+    pub fn run_mine_incremental_raw(
+        &self,
+        bases: &[[u8; 32]],
+        iters: u32,
+    ) -> Vec<Vec<([u8; 32], [u8; 20])>> {
+        let n = bases.len();
+        let mut in_limbs = vec![0u32; n * 8];
+        for (i, k) in bases.iter().enumerate() {
+            for limb in 0..8 {
+                let hi = 28 - limb * 4;
+                in_limbs[i * 8 + limb] =
+                    u32::from_be_bytes([k[hi], k[hi + 1], k[hi + 2], k[hi + 3]]);
+            }
+        }
+
+        // NOTE (corrected post-Task-2 review): `miner.metal`'s pre-existing
+        // `pubkey_to_address` (called by our new kernel) and other kernels
+        // call `keccak256`, so the whole file needs `keccak.metal` present
+        // in the concatenation even though our entry point doesn't call it
+        // directly -- MSL requires every symbol referenced anywhere in the
+        // translation unit to resolve, not just in the dispatched kernel's
+        // call graph. Use the same 4-file concatenation `dispatch_mine` uses.
+        let keccak_src = include_str!("../../kernels/keccak.metal");
+        let field_src = include_str!("../../kernels/field.metal");
+        let ec_src = include_str!("../../kernels/ec.metal");
+        let miner_src = include_str!("../../kernels/miner.metal");
+        let src = format!("{keccak_src}\n{field_src}\n{ec_src}\n{miner_src}");
+
+        let lib = self
+            .device
+            .new_library_with_source(&src, &CompileOptions::new())
+            .expect("kernel compile failed");
+        let func = lib
+            .get_function("mine_incremental_raw_test", None)
+            .expect("entry not found");
+        let pipeline = self
+            .device
+            .new_compute_pipeline_state_with_function(&func)
+            .expect("pipeline");
+
+        let in_buf = self.device.new_buffer_with_data(
+            in_limbs.as_ptr() as *const std::ffi::c_void,
+            (in_limbs.len() * std::mem::size_of::<u32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let iters_arr = [iters];
+        let iters_buf = self.device.new_buffer_with_data(
+            iters_arr.as_ptr() as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let priv_len = n * (iters as usize) * 32;
+        let addr_len = n * (iters as usize) * 20;
+        let out_priv_buf = self
+            .device
+            .new_buffer(priv_len as u64, MTLResourceOptions::StorageModeShared);
+        let out_addr_buf = self
+            .device
+            .new_buffer(addr_len as u64, MTLResourceOptions::StorageModeShared);
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&pipeline);
+        enc.set_buffer(0, Some(&in_buf), 0);
+        enc.set_buffer(1, Some(&iters_buf), 0);
+        enc.set_buffer(2, Some(&out_priv_buf), 0);
+        enc.set_buffer(3, Some(&out_addr_buf), 0);
+        enc.dispatch_thread_groups(MTLSize::new(n as u64, 1, 1), MTLSize::new(1, 1, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let priv_ptr = out_priv_buf.contents() as *const u8;
+        let priv_bytes = unsafe { std::slice::from_raw_parts(priv_ptr, priv_len) };
+        let addr_ptr = out_addr_buf.contents() as *const u8;
+        let addr_bytes = unsafe { std::slice::from_raw_parts(addr_ptr, addr_len) };
+
+        (0..n)
+            .map(|i| {
+                (0..iters as usize)
+                    .map(|it| {
+                        let mut pk = [0u8; 32];
+                        pk.copy_from_slice(
+                            &priv_bytes[(i * iters as usize + it) * 32..(i * iters as usize + it) * 32 + 32],
+                        );
+                        let mut addr = [0u8; 20];
+                        addr.copy_from_slice(
+                            &addr_bytes[(i * iters as usize + it) * 20..(i * iters as usize + it) * 20 + 20],
+                        );
+                        (pk, addr)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     /// Compute the affine secp256k1 public key `k*G` for each 32-byte
     /// big-endian private key on the GPU via `kernels/ec.metal` (concatenated
     /// after `kernels/field.metal`, mirroring `run_field`'s source assembly).
@@ -367,11 +536,13 @@ impl MetalContext {
 
     /// Search `iters` candidate keys per thread (one thread per
     /// `(seed, base_counter)` pair, counters `base_counters[i]..base_counters[i]+iters`)
-    /// via `kernels/miner.metal`'s `mine` kernel, returning every derived
-    /// address with `>= threshold` leading-zero nibbles (bounded to at most
-    /// 1024 hits per call -- extras in a saturated batch are silently
-    /// dropped on the GPU side; callers on a tight loop should keep
-    /// `threshold` high enough that a batch rarely saturates).
+    /// via `kernels/miner.metal`'s `mine` kernel (Approach A: every candidate
+    /// is an independent keccak-derived scalar, full scalar-mult each),
+    /// returning every derived address with `>= threshold` leading-zero
+    /// nibbles (bounded to at most 1024 hits per call -- extras in a
+    /// saturated batch are silently dropped on the GPU side; callers on a
+    /// tight loop should keep `threshold` high enough that a batch rarely
+    /// saturates).
     ///
     /// SECURITY: every returned `Hit` is a GPU-derived candidate only. Callers
     /// MUST re-verify each one with `verify_hit` before treating `address` as
@@ -379,6 +550,42 @@ impl MetalContext {
     /// enforces).
     pub fn dispatch_mine(
         &self,
+        seeds: &[[u8; 32]],
+        base_counters: &[u64],
+        iters: u32,
+        threshold: u32,
+    ) -> Vec<Hit> {
+        self.dispatch_mine_kernel("mine", seeds, base_counters, iters, threshold)
+    }
+
+    /// Search `iters` candidate keys per thread via `kernels/miner.metal`'s
+    /// `mine_incremental` kernel (Approach B: one keccak-derived base scalar
+    /// per thread per batch, then `iters` cheap Jacobian point additions
+    /// instead of `iters` full scalar multiplications -- see
+    /// `docs/specs/2026-07-19-gpu-incremental-ec-miner-design.md` for the
+    /// cost model and the security-model discussion of why this is weaker
+    /// than, but not unsafe compared to, `dispatch_mine`'s Approach A).
+    /// Same wire format, same buffer layout, same 1024-hit cap as `mine`.
+    ///
+    /// SECURITY: same requirement as `dispatch_mine` -- callers MUST
+    /// re-verify every returned `Hit` with `verify_hit` before trusting it.
+    pub fn dispatch_mine_incremental(
+        &self,
+        seeds: &[[u8; 32]],
+        base_counters: &[u64],
+        iters: u32,
+        threshold: u32,
+    ) -> Vec<Hit> {
+        self.dispatch_mine_kernel("mine_incremental", seeds, base_counters, iters, threshold)
+    }
+
+    /// Shared dispatch body for `dispatch_mine`/`dispatch_mine_incremental`:
+    /// both kernels have an identical buffer signature (seeds, base_counters,
+    /// iters, threshold, hit_count, hits), differing only in per-candidate
+    /// math, so only the compiled entry-point name changes.
+    fn dispatch_mine_kernel(
+        &self,
+        entry: &str,
         seeds: &[[u8; 32]],
         base_counters: &[u64],
         iters: u32,
@@ -398,6 +605,22 @@ impl MetalContext {
 
         // Reuse the pre-compiled `mine` pipeline (built once in `new()`) — a hot
         // mining loop no longer recompiles the full MSL on every batch.
+        let keccak_src = include_str!("../../kernels/keccak.metal");
+        let field_src = include_str!("../../kernels/field.metal");
+        let ec_src = include_str!("../../kernels/ec.metal");
+        let miner_src = include_str!("../../kernels/miner.metal");
+        let src = format!("{keccak_src}\n{field_src}\n{ec_src}\n{miner_src}");
+
+        let lib = self
+            .device
+            .new_library_with_source(&src, &CompileOptions::new())
+            .expect("kernel compile failed");
+        let func = lib.get_function(entry, None).expect("entry not found");
+        let pipeline = self
+            .device
+            .new_compute_pipeline_state_with_function(&func)
+            .expect("pipeline");
+
         let seeds_buf = self.device.new_buffer_with_data(
             seed_bytes.as_ptr() as *const std::ffi::c_void,
             seed_bytes.len() as u64,

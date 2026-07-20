@@ -1,4 +1,6 @@
-//! GPU driver: dispatch Metal mine batches, verify every hit vs k256, report.
+//! GPU driver: dispatch Metal incremental-EC mine batches ("Approach B" --
+//! docs/specs/2026-07-19-gpu-incremental-ec-miner-design.md), verify every
+//! hit vs k256, report.
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -53,7 +55,7 @@ pub fn run_batches(ctx: &MetalContext, shared: Arc<MinerShared>, seeds: &[[u8; 3
         let base_counters = vec![base; n];
 
         let t = Instant::now();
-        let hits = ctx.dispatch_mine(seeds, &base_counters, ITERS, threshold);
+        let hits = ctx.dispatch_mine_incremental(seeds, &base_counters, ITERS, threshold);
         let batch_time = t.elapsed();
 
         base = base.wrapping_add(ITERS as u64);
