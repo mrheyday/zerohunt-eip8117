@@ -130,7 +130,8 @@ impl MinerShared {
         match keyenc::encode_key_field(&self.key_sink, &privkey) {
             Ok(key_field) => {
                 let mut file = self.file.lock().unwrap();
-                let _ = writeln!(file, "{}\t{}\t{}\t{}", total, notated, zeros, key_field);
+                writeln!(file, "{}\t{}\t{}\t{}", total, notated, zeros, key_field)
+                    .expect("Unable to write hit to file");
             }
             Err(e) => {
                 eprintln!(
