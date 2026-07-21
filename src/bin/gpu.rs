@@ -57,13 +57,14 @@ async fn main() {
                 i += 1;
                 factory_arg = args.get(i).cloned();
             }
-            "--proxy-init-code-hash" => {
+            // `--proxy-hash` is an accepted alias for `--proxy-init-code-hash`.
+            "--proxy-init-code-hash" | "--proxy-hash" => {
                 i += 1;
                 proxyhash_arg = args.get(i).cloned();
             }
             a if a.starts_with("--") => {
                 eprintln!(
-                    "unknown flag: {a}\nUsage: nullforge-gpu [target] [--reveal]\n  [--create2 --deployer 0x.. --init-code-hash 0x..]\n  [--create3 --factory 0x.. [--proxy-init-code-hash 0x..]]\n  [--createx]"
+                    "unknown flag: {a}\nUsage: nullforge-gpu [target] [--reveal]\n  [--create2 --deployer 0x.. --init-code-hash 0x..]\n  [--create3 --factory 0x.. [--proxy-hash 0x..]]\n  [--createx]"
                 );
                 std::process::exit(2);
             }
