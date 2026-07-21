@@ -342,7 +342,14 @@ fn mine_finds_and_verifies_low_threshold() {
         })
         .collect();
     let base: Vec<u64> = vec![0; seeds.len()];
-    let hits = ctx.dispatch_mine(&seeds, &base, 4096, 2); // >=2 leading zero nibbles
+    // Approach A does a FULL ~2-4k-mult scalarmul PER candidate (~250x the
+    // incremental walk), so 256*4096 ~= 1M scalarmuls in one command buffer
+    // overruns the GPU watchdog on some devices (e.g. Apple M1) -- the command
+    // is killed and hit_count reads 0. Keep the batch light: 256*16 = 4096
+    // candidates is ~16 expected hits at threshold 2 (P(0 hits) ~= 1e-7) while
+    // staying well under the watchdog. (`mine_incremental` can use 4096 iters
+    // because its per-candidate cost is ~250x smaller.)
+    let hits = ctx.dispatch_mine(&seeds, &base, 16, 2); // >=2 leading zero nibbles
     assert!(!hits.is_empty(), "should find >=2-zero addresses");
     for h in &hits {
         assert!(
