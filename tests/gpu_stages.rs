@@ -1,7 +1,27 @@
 use nullforge::gpu::MetalContext;
+use std::sync::{Mutex, MutexGuard};
+
+/// Serializes every GPU-touching test onto one Metal command stream.
+///
+/// `cargo test` runs test fns concurrently by default. Each test here builds
+/// its own `MetalContext` and dispatches real compute work; running ~10 of them
+/// at once oversubscribes the single M1 GPU, and the OS watchdog then kills
+/// whichever command buffers overrun — surfacing as nondeterministic "0 hits"
+/// or host-re-derivation failures in whichever tests lost the race. Holding this
+/// lock across each test's GPU section makes the suite deterministic without the
+/// caller having to remember `--test-threads=1`.
+///
+/// Poison is deliberately recovered: a panic in one GPU test (e.g. the fail-loud
+/// watchdog check in `MetalContext`) must not cascade a `PoisonError` into every
+/// other test.
+fn gpu_guard() -> MutexGuard<'static, ()> {
+    static GPU_LOCK: Mutex<()> = Mutex::new(());
+    GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[test]
 fn echo_kernel_doubles_thread_id() {
+    let _gpu = gpu_guard();
     let ctx = MetalContext::new();
     let src = include_str!("../kernels/echo.metal");
     let out = ctx.run_u32_kernel(src, "echo", 256, 4, 64);
@@ -14,6 +34,7 @@ fn echo_kernel_doubles_thread_id() {
 #[test]
 fn keccak_matches_host_reference() {
     use ethers::utils::keccak256;
+    let _gpu = gpu_guard();
     let ctx = MetalContext::new();
     let inputs: Vec<Vec<u8>> = vec![vec![], b"abc".to_vec(), (0u8..64).collect()];
     let gpu = ctx.run_keccak_fixed64(&inputs);
@@ -126,6 +147,7 @@ fn host_field_reference_is_self_consistent() {
 #[test]
 fn field_ops_match_host_mod_p() {
     let p = secp_p();
+    let _gpu = gpu_guard();
     let ctx = MetalContext::new();
     // p-1 and p-2 as hex (from the brief's given secp256k1 modulus).
     let p_minus_1 = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2E";
@@ -169,6 +191,7 @@ fn secp_n() -> U256 {
 #[test]
 fn scalar_add_small_matches_host_mod_n() {
     let n = secp_n();
+    let _gpu = gpu_guard();
     let ctx = MetalContext::new();
 
     let bases = vec![
@@ -203,6 +226,7 @@ fn incremental_walk_matches_k256() {
     use ethers::core::k256::ecdsa::SigningKey;
     use ethers::utils::secret_key_to_address;
     let n = secp_n();
+    let _gpu = gpu_guard();
     let ctx = MetalContext::new();
 
     let mut bases: Vec<[u8; 32]> = vec![
@@ -264,6 +288,7 @@ fn hex_to_32(h: &str) -> [u8; 32] {
 #[test]
 fn scalarmul_matches_k256_pubkey() {
     use ethers::core::k256::ecdsa::SigningKey;
+    let _gpu = gpu_guard();
     let ctx = MetalContext::new();
     // deterministic keys incl. edges: 1, 2, and a fixed 32-byte value
     let mut keys: Vec<[u8; 32]> = vec![[0u8; 32], [0u8; 32], [0u8; 32]];
@@ -301,6 +326,7 @@ fn hex(b: &[u8]) -> String {
 fn pipeline_privkey_and_address_match_host() {
     use ethers::core::k256::ecdsa::SigningKey;
     use ethers::utils::secret_key_to_address;
+    let _gpu = gpu_guard();
     let ctx = MetalContext::new();
     let seeds: Vec<[u8; 32]> = (0..8)
         .map(|i| {
@@ -331,6 +357,7 @@ fn pipeline_privkey_and_address_match_host() {
 
 #[test]
 fn mine_finds_and_verifies_low_threshold() {
+    let _gpu = gpu_guard();
     let ctx = MetalContext::new();
     let seeds: Vec<[u8; 32]> = (0..256)
         .map(|i| {
@@ -342,7 +369,13 @@ fn mine_finds_and_verifies_low_threshold() {
         })
         .collect();
     let base: Vec<u64> = vec![0; seeds.len()];
-    let hits = ctx.dispatch_mine(&seeds, &base, 4096, 2); // >=2 leading zero nibbles
+    // Approach-A `mine` does a FULL secp256k1 scalar-mul per candidate, so a
+    // large per-dispatch iters count keeps one command buffer on the GPU long
+    // enough to trip the M1 watchdog (killed buffer -> torn output -> 0 hits).
+    // 16 iters x 256 seeds is ample to find a >=2-nibble hit while staying well
+    // under the watchdog. (The cheap incremental walk in
+    // `mine_incremental_finds_and_verifies_low_threshold` can afford far more.)
+    let hits = ctx.dispatch_mine(&seeds, &base, 16, 2); // >=2 leading zero nibbles
     assert!(!hits.is_empty(), "should find >=2-zero addresses");
     for h in &hits {
         assert!(
@@ -360,6 +393,7 @@ fn mine_finds_and_verifies_low_threshold() {
 
 #[test]
 fn mine_incremental_finds_and_verifies_low_threshold() {
+    let _gpu = gpu_guard();
     let ctx = MetalContext::new();
     let seeds: Vec<[u8; 32]> = (0..256)
         .map(|i| {
@@ -395,6 +429,7 @@ fn gpu_driver_finds_and_reports_low_target() {
     use std::sync::Arc;
     use std::time::Instant;
 
+    let _gpu = gpu_guard();
     let ctx = MetalContext::new();
 
     let file = tempfile::NamedTempFile::new().unwrap();
@@ -437,6 +472,7 @@ fn create2_finds_and_verifies_low_threshold() {
     use ethers::types::Address;
     use ethers::utils::get_create2_address_from_hash;
 
+    let _gpu = gpu_guard();
     let ctx = MetalContext::new();
     let deployer: [u8; 20] = [0x11; 20];
     let initcodehash: [u8; 32] = [0x22; 32];
@@ -482,6 +518,7 @@ fn create2_finds_and_verifies_low_threshold() {
 fn create3_finds_and_verifies_low_threshold() {
     use nullforge::gpu::STANDARD_CREATE3_PROXY_HASH;
 
+    let _gpu = gpu_guard();
     let ctx = MetalContext::new();
     let factory: [u8; 20] = [0x11; 20];
     let proxy_hash = STANDARD_CREATE3_PROXY_HASH;
@@ -516,6 +553,7 @@ fn create3_finds_and_verifies_low_threshold() {
 fn createx_finds_and_verifies_low_threshold() {
     use nullforge::gpu::{CREATEX_ADDRESS, STANDARD_CREATE3_PROXY_HASH};
 
+    let _gpu = gpu_guard();
     let ctx = MetalContext::new();
     let proxy_hash = STANDARD_CREATE3_PROXY_HASH;
 

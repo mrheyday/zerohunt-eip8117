@@ -1,6 +1,7 @@
 use ethers::types::U256;
 use metal::{
-    CommandQueue, CompileOptions, ComputePipelineState, Device, MTLResourceOptions, MTLSize,
+    CommandBufferRef, CommandQueue, CompileOptions, ComputePipelineState, Device,
+    MTLCommandBufferStatus, MTLResourceOptions, MTLSize,
 };
 
 pub struct MetalContext {
@@ -167,6 +168,30 @@ impl MetalContext {
             .expect("mine pipeline")
     }
 
+    /// Commit `cmd`, block until the GPU finishes, and hard-fail if the command
+    /// buffer did not complete successfully.
+    ///
+    /// On Apple Silicon a compute command that runs past the GPU watchdog
+    /// timeout is killed by the OS: `wait_until_completed` still returns, but the
+    /// buffer lands in `MTLCommandBufferStatus::Error` and its output buffers are
+    /// left torn/empty. Without this check the caller reads back zero hits and
+    /// reports "nothing found", which is indistinguishable from a genuinely empty
+    /// search space — masking the real cause (batch too large). Panicking here
+    /// turns a silent watchdog kill into an actionable failure: reduce
+    /// iters/threads per dispatch.
+    fn commit_and_wait(cmd: &CommandBufferRef) {
+        cmd.commit();
+        cmd.wait_until_completed();
+        if cmd.status() == MTLCommandBufferStatus::Error {
+            panic!(
+                "Metal command buffer failed (status = Error) — likely a GPU \
+                 watchdog timeout. Reduce iters/threads per dispatch: the M1 GPU \
+                 kills any single compute command that runs too long, leaving a \
+                 torn/empty output buffer that would otherwise read as 0 hits."
+            );
+        }
+    }
+
     /// Compile `src`, dispatch `entry` over `tgroups*tperg` threads writing a
     /// `u32` output buffer of `out_len` elements, and return its contents.
     pub fn run_u32_kernel(
@@ -198,8 +223,7 @@ impl MetalContext {
         enc.set_buffer(0, Some(&out_buf), 0);
         enc.dispatch_thread_groups(MTLSize::new(tgroups, 1, 1), MTLSize::new(tperg, 1, 1));
         enc.end_encoding();
-        cmd.commit();
-        cmd.wait_until_completed();
+        Self::commit_and_wait(cmd);
 
         let ptr = out_buf.contents() as *const u32;
         unsafe { std::slice::from_raw_parts(ptr, out_len) }.to_vec()
@@ -273,8 +297,7 @@ impl MetalContext {
         enc.set_buffer(3, Some(&op_buf), 0);
         enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(1, 1, 1));
         enc.end_encoding();
-        cmd.commit();
-        cmd.wait_until_completed();
+        Self::commit_and_wait(cmd);
 
         let ptr = out_buf.contents() as *const u32;
         let limbs = unsafe { std::slice::from_raw_parts(ptr, 8) };
@@ -337,8 +360,7 @@ impl MetalContext {
         enc.set_buffer(2, Some(&out_buf), 0);
         enc.dispatch_thread_groups(MTLSize::new(n as u64, 1, 1), MTLSize::new(1, 1, 1));
         enc.end_encoding();
-        cmd.commit();
-        cmd.wait_until_completed();
+        Self::commit_and_wait(cmd);
 
         let ptr = out_buf.contents() as *const u32;
         let limbs = unsafe { std::slice::from_raw_parts(ptr, out_len) };
@@ -425,8 +447,7 @@ impl MetalContext {
         enc.set_buffer(3, Some(&out_addr_buf), 0);
         enc.dispatch_thread_groups(MTLSize::new(n as u64, 1, 1), MTLSize::new(1, 1, 1));
         enc.end_encoding();
-        cmd.commit();
-        cmd.wait_until_completed();
+        Self::commit_and_wait(cmd);
 
         let priv_ptr = out_priv_buf.contents() as *const u8;
         let priv_bytes = unsafe { std::slice::from_raw_parts(priv_ptr, priv_len) };
@@ -501,8 +522,7 @@ impl MetalContext {
         enc.set_buffer(1, Some(&out_buf), 0);
         enc.dispatch_thread_groups(MTLSize::new(n as u64, 1, 1), MTLSize::new(1, 1, 1));
         enc.end_encoding();
-        cmd.commit();
-        cmd.wait_until_completed();
+        Self::commit_and_wait(cmd);
 
         let ptr = out_buf.contents() as *const u32;
         let limbs = unsafe { std::slice::from_raw_parts(ptr, out_len) };
@@ -588,8 +608,7 @@ impl MetalContext {
         enc.set_buffer(3, Some(&out_addr_buf), 0);
         enc.dispatch_thread_groups(MTLSize::new(n as u64, 1, 1), MTLSize::new(1, 1, 1));
         enc.end_encoding();
-        cmd.commit();
-        cmd.wait_until_completed();
+        Self::commit_and_wait(cmd);
 
         let priv_ptr = out_priv_buf.contents() as *const u8;
         let priv_bytes = unsafe { std::slice::from_raw_parts(priv_ptr, n * 32) };
@@ -754,8 +773,7 @@ impl MetalContext {
             .max(1);
         enc.dispatch_threads(MTLSize::new(n as u64, 1, 1), MTLSize::new(tg, 1, 1));
         enc.end_encoding();
-        cmd.commit();
-        cmd.wait_until_completed();
+        Self::commit_and_wait(cmd);
 
         let found = unsafe { *(hit_count_buf.contents() as *const u32) } as usize;
         let count = found.min(MINE_MAX_HITS);
@@ -889,8 +907,7 @@ impl MetalContext {
             .max(1);
         enc.dispatch_threads(MTLSize::new(n as u64, 1, 1), MTLSize::new(tg, 1, 1));
         enc.end_encoding();
-        cmd.commit();
-        cmd.wait_until_completed();
+        Self::commit_and_wait(cmd);
 
         let found = unsafe { *(hit_count_buf.contents() as *const u32) } as usize;
         let count = found.min(MINE_MAX_HITS);
@@ -1025,8 +1042,7 @@ impl MetalContext {
             .max(1);
         enc.dispatch_threads(MTLSize::new(n as u64, 1, 1), MTLSize::new(tg, 1, 1));
         enc.end_encoding();
-        cmd.commit();
-        cmd.wait_until_completed();
+        Self::commit_and_wait(cmd);
 
         let found = unsafe { *(hit_count_buf.contents() as *const u32) } as usize;
         let count = found.min(MINE_MAX_HITS);
@@ -1171,8 +1187,7 @@ impl MetalContext {
             .max(1);
         enc.dispatch_threads(MTLSize::new(n as u64, 1, 1), MTLSize::new(tg, 1, 1));
         enc.end_encoding();
-        cmd.commit();
-        cmd.wait_until_completed();
+        Self::commit_and_wait(cmd);
 
         let found = unsafe { *(hit_count_buf.contents() as *const u32) } as usize;
         let count = found.min(MINE_MAX_HITS);
@@ -1262,8 +1277,7 @@ impl MetalContext {
         enc.set_buffer(2, Some(&out_buf), 0);
         enc.dispatch_thread_groups(MTLSize::new(n as u64, 1, 1), MTLSize::new(1, 1, 1));
         enc.end_encoding();
-        cmd.commit();
-        cmd.wait_until_completed();
+        Self::commit_and_wait(cmd);
 
         let ptr = out_buf.contents() as *const u8;
         let bytes = unsafe { std::slice::from_raw_parts(ptr, n * 32) };
