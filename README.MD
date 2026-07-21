@@ -209,7 +209,7 @@ Derivation:
 `address = keccak256(0xd6 ‖ 0x94 ‖ proxy ‖ 0x01)[12:]` (the proxy's nonce-1
 CREATE). New bests append to `scanned_salts.txt`, same format as CREATE2.
 
-> ⚠️ **`--proxy-init-code-hash` is factory-specific.** It defaults to the
+> ⚠️ **`--proxy-init-code-hash` (alias `--proxy-hash`) is factory-specific.** It defaults to the
 > Solmate/0xSequence proxy hash
 > (`0x21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f`), but
 > **Solady** and **CreateX** differ, and **CreateX additionally guards the salt**
@@ -227,7 +227,7 @@ CREATE). New bests append to `scanned_salts.txt`, same format as CREATE2.
 | `nullforge [N] [--reveal]` | CPU miner. `N` = target leading-zero nibbles (default `8`, valid `1–40`). |
 | `nullforge-gpu [N] [--reveal]` | Unified CPU + GPU miner (Apple Metal). Same args. |
 | `nullforge-gpu [N] --create2 --deployer 0x.. --init-code-hash 0x..` | Mine a CREATE2 **salt** so a *contract* deploys to an N-leading-zero address (keccak-only; salt is public → plaintext `scanned_salts.txt`). |
-| `nullforge-gpu [N] --create3 --factory 0x.. [--proxy-init-code-hash 0x..]` | Mine a CREATE3 **salt** so a *contract* deploys to an N-leading-zero, **bytecode-independent** address (same on every chain with that factory). Proxy hash defaults to Solmate/0xSequence; override for Solady/CreateX. |
+| `nullforge-gpu [N] --create3 --factory 0x.. [--proxy-hash 0x..]` | Mine a CREATE3 **salt** so a *contract* deploys to an N-leading-zero, **bytecode-independent** address (same on every chain with that factory). Proxy hash defaults to Solmate/0xSequence; override (`--proxy-hash`, alias `--proxy-init-code-hash`) for Solady/CreateX. |
 | `nullforge-gpu [N] --createx` | Mine a **CreateX** permissionless CREATE3 salt (deployer + proxy hash are the fixed canonical CreateX constants; the salt is guarded as `keccak256(salt)` in-kernel). Pass the recorded salt straight to `CreateX.deployCreate3(salt, initCode)`. |
 | `nullforge-keygen` | One-time setup: prints the SECRET age identity to **stdout**, writes the PUBLIC recipient to `age-recipient.txt`. |
 | `nullforge-decrypt -i <identity> [file]` | Offline recovery: decrypts the key column of `scanned_keys.txt` (default `file`) with your secret identity. |
