@@ -17,7 +17,25 @@ pub struct MetalContext {
     /// compiled once and reused by every `dispatch_create3` batch. CREATE3 salt
     /// mining needs no secp256k1.
     create3_pipeline: ComputePipelineState,
+    /// The `mine_createx` pipeline (keccak-only, three keccaks/candidate: the
+    /// CreateX salt guard, then the CREATE3 proxy + final). Compiled once,
+    /// reused by every `dispatch_createx` batch.
+    createx_pipeline: ComputePipelineState,
 }
+
+/// CreateX (pcaversaccio) canonical cross-chain address — the CREATE2 deployer
+/// of the CREATE3 proxy, identical on every supported chain.
+pub const CREATEX_ADDRESS: [u8; 20] = [
+    0xba, 0x5E, 0xd0, 0x99, 0x63, 0x3D, 0x3B, 0x31, 0x3e, 0x4D, 0x5F, 0x7b, 0xdc, 0x13, 0x05, 0xd3,
+    0xc2, 0x8b, 0xa5, 0xEd,
+];
+
+/// Standard CREATE3 proxy init-code hash (Solmate/0xSequence/CreateX all share
+/// the same 16-byte proxy `0x67363d3d37363d34f03d5260086018f3`).
+pub const STANDARD_CREATE3_PROXY_HASH: [u8; 32] = [
+    0x21, 0xc3, 0x5d, 0xbe, 0x1b, 0x34, 0x4a, 0x24, 0x88, 0xcf, 0x33, 0x21, 0xd6, 0xce, 0x54, 0x2f,
+    0x8e, 0x9f, 0x30, 0x55, 0x44, 0xff, 0x09, 0xe4, 0x99, 0x3a, 0x62, 0x31, 0x9a, 0x49, 0x7c, 0x1f,
+];
 
 /// A verified-candidate mining hit: a private key whose derived Ethereum
 /// address has `zeros` leading zero nibbles (counted by the same semantics as
@@ -64,13 +82,32 @@ impl MetalContext {
         let mine_pipeline = Self::build_mine_pipeline(&device);
         let create2_pipeline = Self::build_create2_pipeline(&device);
         let create3_pipeline = Self::build_create3_pipeline(&device);
+        let createx_pipeline = Self::build_createx_pipeline(&device);
         Self {
             device,
             queue,
             mine_pipeline,
             create2_pipeline,
             create3_pipeline,
+            createx_pipeline,
         }
+    }
+
+    /// Compile the CreateX MSL (keccak + createx) and build the `mine_createx`
+    /// pipeline. Called once from `new()`, reused by every `dispatch_createx`.
+    fn build_createx_pipeline(device: &Device) -> ComputePipelineState {
+        let keccak_src = include_str!("../../kernels/keccak.metal");
+        let createx_src = include_str!("../../kernels/createx.metal");
+        let src = format!("{keccak_src}\n{createx_src}");
+        let lib = device
+            .new_library_with_source(&src, &CompileOptions::new())
+            .expect("createx kernel compile failed");
+        let func = lib
+            .get_function("mine_createx", None)
+            .expect("mine_createx entry not found");
+        device
+            .new_compute_pipeline_state_with_function(&func)
+            .expect("createx pipeline")
     }
 
     /// Compile the CREATE3 MSL (keccak + create3, no secp256k1) and build the
@@ -1034,6 +1071,150 @@ impl MetalContext {
         pre.extend_from_slice(proxyhash);
         let proxy = keccak256(&pre);
         // Step 2: addr = RLP([proxy, nonce=1]) -> keccak -> low 20 bytes
+        let mut rlp = Vec::with_capacity(23);
+        rlp.push(0xd6);
+        rlp.push(0x94);
+        rlp.extend_from_slice(&proxy[12..32]);
+        rlp.push(0x01);
+        &keccak256(&rlp)[12..32] == address
+    }
+
+    /// Dispatch one CreateX permissionless-CREATE3 batch: `mine_createx` scans
+    /// `iters` salts per thread, guarding each (`guardedSalt = keccak256(salt)`)
+    /// and computing the CreateX CREATE3 address, reporting salts whose FINAL
+    /// address has `>= threshold` leading zero nibbles. `createx`/`proxyhash`
+    /// are the canonical constants (`CREATEX_ADDRESS` / `STANDARD_CREATE3_PROXY_HASH`).
+    /// The emitted salt is the ORIGINAL (un-guarded) salt to pass to
+    /// `CreateX.deployCreate3`. Every hit MUST be re-verified via `verify_createx`.
+    pub fn dispatch_createx(
+        &self,
+        createx: &[u8; 20],
+        proxyhash: &[u8; 32],
+        base_salts: &[[u8; 32]],
+        base_counters: &[u64],
+        iters: u32,
+        threshold: u32,
+    ) -> Vec<Create3Hit> {
+        assert_eq!(
+            base_salts.len(),
+            base_counters.len(),
+            "base_salts/base_counters length mismatch"
+        );
+        let n = base_salts.len();
+
+        let mut salt_bytes = vec![0u8; n * 32];
+        for (i, s) in base_salts.iter().enumerate() {
+            salt_bytes[i * 32..i * 32 + 32].copy_from_slice(s);
+        }
+
+        let createx_buf = self.device.new_buffer_with_data(
+            createx.as_ptr() as *const std::ffi::c_void,
+            20,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let ph_buf = self.device.new_buffer_with_data(
+            proxyhash.as_ptr() as *const std::ffi::c_void,
+            32,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let salts_buf = self.device.new_buffer_with_data(
+            salt_bytes.as_ptr() as *const std::ffi::c_void,
+            salt_bytes.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let counters_buf = self.device.new_buffer_with_data(
+            base_counters.as_ptr() as *const std::ffi::c_void,
+            std::mem::size_of_val(base_counters) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let iters_buf = self.device.new_buffer_with_data(
+            &iters as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let threshold_buf = self.device.new_buffer_with_data(
+            &threshold as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let hit_count_buf = self.device.new_buffer(
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        unsafe {
+            std::ptr::write_bytes(
+                hit_count_buf.contents() as *mut u8,
+                0,
+                std::mem::size_of::<u32>(),
+            );
+        }
+        let hits_bytes = MINE_MAX_HITS * MINE_HIT_STRIDE;
+        let hits_buf = self
+            .device
+            .new_buffer(hits_bytes as u64, MTLResourceOptions::StorageModeShared);
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&self.createx_pipeline);
+        enc.set_buffer(0, Some(&createx_buf), 0);
+        enc.set_buffer(1, Some(&ph_buf), 0);
+        enc.set_buffer(2, Some(&salts_buf), 0);
+        enc.set_buffer(3, Some(&counters_buf), 0);
+        enc.set_buffer(4, Some(&iters_buf), 0);
+        enc.set_buffer(5, Some(&threshold_buf), 0);
+        enc.set_buffer(6, Some(&hit_count_buf), 0);
+        enc.set_buffer(7, Some(&hits_buf), 0);
+        let tg = self
+            .createx_pipeline
+            .max_total_threads_per_threadgroup()
+            .min(n as u64)
+            .max(1);
+        enc.dispatch_threads(MTLSize::new(n as u64, 1, 1), MTLSize::new(tg, 1, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let found = unsafe { *(hit_count_buf.contents() as *const u32) } as usize;
+        let count = found.min(MINE_MAX_HITS);
+        let ptr = hits_buf.contents() as *const u8;
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, hits_bytes) };
+
+        (0..count)
+            .map(|i| {
+                let rec = i * MINE_HIT_STRIDE;
+                let mut salt = [0u8; 32];
+                salt.copy_from_slice(&bytes[rec..rec + 32]);
+                let mut address = [0u8; 20];
+                address.copy_from_slice(&bytes[rec + 32..rec + 52]);
+                let zeros = bytes[rec + 52];
+                Create3Hit {
+                    salt,
+                    address,
+                    zeros,
+                }
+            })
+            .collect()
+    }
+
+    /// Host-side re-derivation of a CreateX permissionless CREATE3 address:
+    ///   guarded = keccak256(salt)
+    ///   proxy   = keccak256(0xff ‖ createx ‖ guarded ‖ proxyhash)[12:]
+    ///   addr    = keccak256(0xd6 ‖ 0x94 ‖ proxy ‖ 0x01)[12:]
+    pub fn verify_createx(
+        &self,
+        createx: &[u8; 20],
+        proxyhash: &[u8; 32],
+        salt: &[u8; 32],
+        address: &[u8; 20],
+    ) -> bool {
+        use ethers::utils::keccak256;
+        let guarded = keccak256(salt); // permissionless branch: keccak256(abi.encode(salt))
+        let mut pre = Vec::with_capacity(85);
+        pre.push(0xff);
+        pre.extend_from_slice(createx);
+        pre.extend_from_slice(&guarded);
+        pre.extend_from_slice(proxyhash);
+        let proxy = keccak256(&pre);
         let mut rlp = Vec::with_capacity(23);
         rlp.push(0xd6);
         rlp.push(0x94);

@@ -32,6 +32,7 @@ async fn main() {
     let mut reveal = false;
     let mut create2 = false;
     let mut create3 = false;
+    let mut createx = false;
     let mut deployer_arg: Option<String> = None;
     let mut ich_arg: Option<String> = None;
     let mut factory_arg: Option<String> = None;
@@ -43,6 +44,7 @@ async fn main() {
             "--reveal" => reveal = true,
             "--create2" => create2 = true,
             "--create3" => create3 = true,
+            "--createx" => createx = true,
             "--deployer" => {
                 i += 1;
                 deployer_arg = args.get(i).cloned();
@@ -61,7 +63,7 @@ async fn main() {
             }
             a if a.starts_with("--") => {
                 eprintln!(
-                    "unknown flag: {a}\nUsage: nullforge-gpu [target] [--reveal]\n  [--create2 --deployer 0x.. --init-code-hash 0x..]\n  [--create3 --factory 0x.. [--proxy-init-code-hash 0x..]]"
+                    "unknown flag: {a}\nUsage: nullforge-gpu [target] [--reveal]\n  [--create2 --deployer 0x.. --init-code-hash 0x..]\n  [--create3 --factory 0x.. [--proxy-init-code-hash 0x..]]\n  [--createx]"
                 );
                 std::process::exit(2);
             }
@@ -165,6 +167,31 @@ async fn main() {
         println!("nullforge-gpu --create3: mining a CREATE3 address with {target} leading zeros");
         let handle = task::spawn_blocking(move || {
             nullforge::miner::create3::run_create3(&ctx, &factory, &proxyhash, target, stop);
+        });
+        let _ = handle.await;
+        return;
+    }
+
+    // CreateX permissionless CREATE3 mode: deployer + proxy hash are the fixed
+    // canonical CreateX constants, so no --factory/--proxy-init-code-hash is
+    // needed. The mined salt is what you pass to CreateX.deployCreate3.
+    if createx {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                println!("Received Ctrl+C. Stopping...");
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+        let ctx = MetalContext::new();
+        println!(
+            "nullforge-gpu --createx: mining a CreateX (permissionless) CREATE3 address with \
+             {target} leading zeros"
+        );
+        let handle = task::spawn_blocking(move || {
+            nullforge::miner::createx::run_createx(&ctx, target, stop);
         });
         let _ = handle.await;
         return;

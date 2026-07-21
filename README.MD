@@ -228,6 +228,7 @@ CREATE). New bests append to `scanned_salts.txt`, same format as CREATE2.
 | `nullforge-gpu [N] [--reveal]` | Unified CPU + GPU miner (Apple Metal). Same args. |
 | `nullforge-gpu [N] --create2 --deployer 0x.. --init-code-hash 0x..` | Mine a CREATE2 **salt** so a *contract* deploys to an N-leading-zero address (keccak-only; salt is public → plaintext `scanned_salts.txt`). |
 | `nullforge-gpu [N] --create3 --factory 0x.. [--proxy-init-code-hash 0x..]` | Mine a CREATE3 **salt** so a *contract* deploys to an N-leading-zero, **bytecode-independent** address (same on every chain with that factory). Proxy hash defaults to Solmate/0xSequence; override for Solady/CreateX. |
+| `nullforge-gpu [N] --createx` | Mine a **CreateX** permissionless CREATE3 salt (deployer + proxy hash are the fixed canonical CreateX constants; the salt is guarded as `keccak256(salt)` in-kernel). Pass the recorded salt straight to `CreateX.deployCreate3(salt, initCode)`. |
 | `nullforge-keygen` | One-time setup: prints the SECRET age identity to **stdout**, writes the PUBLIC recipient to `age-recipient.txt`. |
 | `nullforge-decrypt -i <identity> [file]` | Offline recovery: decrypts the key column of `scanned_keys.txt` (default `file`) with your secret identity. |
 
