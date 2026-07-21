@@ -477,3 +477,70 @@ fn create2_finds_and_verifies_low_threshold() {
         assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
     }
 }
+
+#[test]
+fn create3_finds_and_verifies_low_threshold() {
+    use nullforge::gpu::STANDARD_CREATE3_PROXY_HASH;
+
+    let ctx = MetalContext::new();
+    let factory: [u8; 20] = [0x11; 20];
+    let proxy_hash = STANDARD_CREATE3_PROXY_HASH;
+
+    let n = 256usize;
+    let base_salts: Vec<[u8; 32]> = (0..n)
+        .map(|i| {
+            let mut s = [0u8; 32];
+            s[0] = (i & 0xff) as u8;
+            s[1] = (i >> 8) as u8;
+            s[23] = 0x11;
+            s
+        })
+        .collect();
+    let base_counters: Vec<u64> = vec![0u64; n];
+
+    // >= 2 leading zero nibbles across 256*4096 candidates -> plenty of hits fast.
+    let hits = ctx.dispatch_create3(&factory, &proxy_hash, &base_salts, &base_counters, 4096, 2);
+    assert!(!hits.is_empty(), "should find >=2-zero CREATE3 addresses");
+
+    for h in &hits {
+        // Host re-derivation gate (proxy CREATE2 -> proxy CREATE nonce-1).
+        assert!(
+            ctx.verify_create3(&factory, &proxy_hash, &h.salt, &h.address),
+            "GPU CREATE3 hit failed host re-derivation"
+        );
+        assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
+    }
+}
+
+#[test]
+fn createx_finds_and_verifies_low_threshold() {
+    use nullforge::gpu::{CREATEX_ADDRESS, STANDARD_CREATE3_PROXY_HASH};
+
+    let ctx = MetalContext::new();
+    let proxy_hash = STANDARD_CREATE3_PROXY_HASH;
+
+    let n = 256usize;
+    let base_salts: Vec<[u8; 32]> = (0..n)
+        .map(|i| {
+            let mut s = [0u8; 32];
+            s[0] = (i & 0xff) as u8;
+            s[1] = (i >> 8) as u8;
+            s[23] = 0x22;
+            s
+        })
+        .collect();
+    let base_counters: Vec<u64> = vec![0u64; n];
+
+    let hits = ctx.dispatch_createx(&CREATEX_ADDRESS, &proxy_hash, &base_salts, &base_counters, 4096, 2);
+    assert!(!hits.is_empty(), "should find >=2-zero CreateX addresses");
+
+    for h in &hits {
+        // `h.salt` is the ORIGINAL (un-guarded) salt; verify_createx re-guards
+        // it (keccak256(salt)) internally before the two-hop CREATE3 derivation.
+        assert!(
+            ctx.verify_createx(&CREATEX_ADDRESS, &proxy_hash, &h.salt, &h.address),
+            "GPU CreateX hit failed host re-derivation"
+        );
+        assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
+    }
+}
