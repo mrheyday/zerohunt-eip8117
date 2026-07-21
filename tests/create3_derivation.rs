@@ -89,7 +89,7 @@ fn createx_permissionless_guard_and_address() {
     let createx = hex20("ba5Ed099633D3B313e4D5F7bdc1305d3c28ba5Ed");
     let proxy_hash = hex32("21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f");
     let salt = [0x55u8; 32];
-    let guarded: [u8; 32] = keccak256(salt).into();
+    let guarded: [u8; 32] = keccak256(salt);
     let addr = create3(&createx, &guarded, &proxy_hash);
     // Cross-checked against alloy: CreateX.create2(keccak256(salt), proxyhash).create(1).
     assert_eq!(addr, hex20("6AB3688850Fa6A6c22016E5788a8B90B9ffe6967"));

@@ -689,7 +689,7 @@ impl MetalContext {
             .new_library_with_source(&src, &CompileOptions::new())
             .expect("kernel compile failed");
         let func = lib.get_function(entry, None).expect("entry not found");
-        let pipeline = self
+        let _pipeline = self
             .device
             .new_compute_pipeline_state_with_function(&func)
             .expect("pipeline");
