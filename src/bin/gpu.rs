@@ -31,14 +31,18 @@ async fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut reveal = false;
     let mut create2 = false;
+    let mut create3 = false;
     let mut deployer_arg: Option<String> = None;
     let mut ich_arg: Option<String> = None;
+    let mut factory_arg: Option<String> = None;
+    let mut proxyhash_arg: Option<String> = None;
     let mut target_arg: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--reveal" => reveal = true,
             "--create2" => create2 = true,
+            "--create3" => create3 = true,
             "--deployer" => {
                 i += 1;
                 deployer_arg = args.get(i).cloned();
@@ -47,9 +51,17 @@ async fn main() {
                 i += 1;
                 ich_arg = args.get(i).cloned();
             }
+            "--factory" => {
+                i += 1;
+                factory_arg = args.get(i).cloned();
+            }
+            "--proxy-init-code-hash" => {
+                i += 1;
+                proxyhash_arg = args.get(i).cloned();
+            }
             a if a.starts_with("--") => {
                 eprintln!(
-                    "unknown flag: {a}\nUsage: nullforge-gpu [target] [--reveal] [--create2 --deployer 0x.. --init-code-hash 0x..]"
+                    "unknown flag: {a}\nUsage: nullforge-gpu [target] [--reveal]\n  [--create2 --deployer 0x.. --init-code-hash 0x..]\n  [--create3 --factory 0x.. [--proxy-init-code-hash 0x..]]"
                 );
                 std::process::exit(2);
             }
@@ -104,6 +116,55 @@ async fn main() {
         println!("nullforge-gpu --create2: mining a CREATE2 address with {target} leading zeros");
         let handle = task::spawn_blocking(move || {
             nullforge::miner::create2::run_create2(&ctx, &deployer, &ich, target, stop);
+        });
+        let _ = handle.await;
+        return;
+    }
+
+    // CREATE3 salt-mining mode: keccak-only (two keccaks/candidate). The mined
+    // address is bytecode-independent — it depends only on (factory, salt) — so
+    // the same salt lands on the same address on every chain with this factory.
+    // The output is a PUBLIC salt (no encryption).
+    if create3 {
+        let factory: [u8; 20] = parse_hex_arg(factory_arg, "--factory", 20)
+            .try_into()
+            .unwrap();
+        // The proxy init-code hash is FACTORY-SPECIFIC. Default to the
+        // Solmate/0xSequence CREATE3 proxy hash, but let the user override for
+        // Solady / CreateX / any custom factory. A wrong value can't mine
+        // garbage silently: `verify_create3` re-derives every hit host-side.
+        const DEFAULT_PROXY_INITCODE_HASH: &str =
+            "21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f";
+        let proxyhash: [u8; 32] = match proxyhash_arg {
+            Some(_) => parse_hex_arg(proxyhash_arg, "--proxy-init-code-hash", 32)
+                .try_into()
+                .unwrap(),
+            None => {
+                eprintln!(
+                    "NOTE: --proxy-init-code-hash not given; defaulting to the Solmate/0xSequence \
+                     CREATE3 proxy hash (0x{DEFAULT_PROXY_INITCODE_HASH}). Override this for \
+                     Solady/CreateX or any custom factory, or hits will be for the wrong address."
+                );
+                hex::decode(DEFAULT_PROXY_INITCODE_HASH)
+                    .expect("valid default proxy hash")
+                    .try_into()
+                    .unwrap()
+            }
+        };
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                println!("Received Ctrl+C. Stopping...");
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+        let ctx = MetalContext::new();
+        println!("nullforge-gpu --create3: mining a CREATE3 address with {target} leading zeros");
+        let handle = task::spawn_blocking(move || {
+            nullforge::miner::create3::run_create3(&ctx, &factory, &proxyhash, target, stop);
         });
         let _ = handle.await;
         return;

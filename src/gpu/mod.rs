@@ -13,6 +13,10 @@ pub struct MetalContext {
     /// The `mine_create2` pipeline (keccak-only), compiled once and reused by
     /// every `dispatch_create2` batch. CREATE2 salt mining needs no secp256k1.
     create2_pipeline: ComputePipelineState,
+    /// The `mine_create3` pipeline (keccak-only, two keccaks/candidate),
+    /// compiled once and reused by every `dispatch_create3` batch. CREATE3 salt
+    /// mining needs no secp256k1.
+    create3_pipeline: ComputePipelineState,
 }
 
 /// A verified-candidate mining hit: a private key whose derived Ethereum
@@ -36,6 +40,18 @@ pub struct Create2Hit {
     pub zeros: u8,
 }
 
+/// A CREATE3 vanity-salt hit: a salt whose resulting contract address (from a
+/// fixed CREATE3 factory + its constant proxy init-code hash) has `zeros`
+/// leading zero nibbles. The address is bytecode-independent — it depends only
+/// on (factory, salt). Callers MUST re-verify via
+/// `MetalContext::verify_create3` before trusting `address`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Create3Hit {
+    pub salt: [u8; 32],
+    pub address: [u8; 20],
+    pub zeros: u8,
+}
+
 /// Must match `HIT_STRIDE` in `kernels/miner.metal`.
 const MINE_HIT_STRIDE: usize = 64;
 /// Must match `MAX_HITS` in `kernels/miner.metal`.
@@ -47,12 +63,32 @@ impl MetalContext {
         let queue = device.new_command_queue();
         let mine_pipeline = Self::build_mine_pipeline(&device);
         let create2_pipeline = Self::build_create2_pipeline(&device);
+        let create3_pipeline = Self::build_create3_pipeline(&device);
         Self {
             device,
             queue,
             mine_pipeline,
             create2_pipeline,
+            create3_pipeline,
         }
+    }
+
+    /// Compile the CREATE3 MSL (keccak + create3, no secp256k1) and build the
+    /// `mine_create3` pipeline. Called once from `new()`, reused by every
+    /// `dispatch_create3` call.
+    fn build_create3_pipeline(device: &Device) -> ComputePipelineState {
+        let keccak_src = include_str!("../../kernels/keccak.metal");
+        let create3_src = include_str!("../../kernels/create3.metal");
+        let src = format!("{keccak_src}\n{create3_src}");
+        let lib = device
+            .new_library_with_source(&src, &CompileOptions::new())
+            .expect("create3 kernel compile failed");
+        let func = lib
+            .get_function("mine_create3", None)
+            .expect("mine_create3 entry not found");
+        device
+            .new_compute_pipeline_state_with_function(&func)
+            .expect("create3 pipeline")
     }
 
     /// Compile the CREATE2 MSL (keccak + create2, no secp256k1) and build the
@@ -859,6 +895,151 @@ impl MetalContext {
         preimage.extend_from_slice(salt);
         preimage.extend_from_slice(initcodehash);
         &keccak256(&preimage)[12..32] == address
+    }
+
+    /// Dispatch one CREATE3 keccak-only batch: `mine_create3` scans
+    /// `iters` salts per thread for `factory` + `proxyhash`, reporting salts
+    /// whose FINAL (bytecode-independent) address has `>= threshold` leading
+    /// zero nibbles. Layout mirrors `dispatch_create2`; buffer(1) carries the
+    /// proxy init-code hash instead of the contract init-code hash. Every hit
+    /// MUST be re-verified via `verify_create3` before it is trusted.
+    pub fn dispatch_create3(
+        &self,
+        factory: &[u8; 20],
+        proxyhash: &[u8; 32],
+        base_salts: &[[u8; 32]],
+        base_counters: &[u64],
+        iters: u32,
+        threshold: u32,
+    ) -> Vec<Create3Hit> {
+        assert_eq!(
+            base_salts.len(),
+            base_counters.len(),
+            "base_salts/base_counters length mismatch"
+        );
+        let n = base_salts.len();
+
+        let mut salt_bytes = vec![0u8; n * 32];
+        for (i, s) in base_salts.iter().enumerate() {
+            salt_bytes[i * 32..i * 32 + 32].copy_from_slice(s);
+        }
+
+        let factory_buf = self.device.new_buffer_with_data(
+            factory.as_ptr() as *const std::ffi::c_void,
+            20,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let ph_buf = self.device.new_buffer_with_data(
+            proxyhash.as_ptr() as *const std::ffi::c_void,
+            32,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let salts_buf = self.device.new_buffer_with_data(
+            salt_bytes.as_ptr() as *const std::ffi::c_void,
+            salt_bytes.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let counters_buf = self.device.new_buffer_with_data(
+            base_counters.as_ptr() as *const std::ffi::c_void,
+            std::mem::size_of_val(base_counters) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let iters_buf = self.device.new_buffer_with_data(
+            &iters as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let threshold_buf = self.device.new_buffer_with_data(
+            &threshold as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let hit_count_buf = self.device.new_buffer(
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        unsafe {
+            std::ptr::write_bytes(
+                hit_count_buf.contents() as *mut u8,
+                0,
+                std::mem::size_of::<u32>(),
+            );
+        }
+        let hits_bytes = MINE_MAX_HITS * MINE_HIT_STRIDE;
+        let hits_buf = self
+            .device
+            .new_buffer(hits_bytes as u64, MTLResourceOptions::StorageModeShared);
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&self.create3_pipeline);
+        enc.set_buffer(0, Some(&factory_buf), 0);
+        enc.set_buffer(1, Some(&ph_buf), 0);
+        enc.set_buffer(2, Some(&salts_buf), 0);
+        enc.set_buffer(3, Some(&counters_buf), 0);
+        enc.set_buffer(4, Some(&iters_buf), 0);
+        enc.set_buffer(5, Some(&threshold_buf), 0);
+        enc.set_buffer(6, Some(&hit_count_buf), 0);
+        enc.set_buffer(7, Some(&hits_buf), 0);
+        let tg = self
+            .create3_pipeline
+            .max_total_threads_per_threadgroup()
+            .min(n as u64)
+            .max(1);
+        enc.dispatch_threads(MTLSize::new(n as u64, 1, 1), MTLSize::new(tg, 1, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let found = unsafe { *(hit_count_buf.contents() as *const u32) } as usize;
+        let count = found.min(MINE_MAX_HITS);
+        let ptr = hits_buf.contents() as *const u8;
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, hits_bytes) };
+
+        (0..count)
+            .map(|i| {
+                let rec = i * MINE_HIT_STRIDE;
+                let mut salt = [0u8; 32];
+                salt.copy_from_slice(&bytes[rec..rec + 32]);
+                let mut address = [0u8; 20];
+                address.copy_from_slice(&bytes[rec + 32..rec + 52]);
+                let zeros = bytes[rec + 52];
+                Create3Hit {
+                    salt,
+                    address,
+                    zeros,
+                }
+            })
+            .collect()
+    }
+
+    /// Host-side re-derivation of a CREATE3 address, used to verify every GPU
+    /// hit before it is trusted (a mismatch indicates a kernel/host divergence
+    /// or a wrong `proxyhash`, and the caller hard-aborts):
+    ///   proxy = keccak256(0xff ‖ factory ‖ salt ‖ proxyhash)[12:]
+    ///   addr  = keccak256(0xd6 ‖ 0x94 ‖ proxy ‖ 0x01)[12:]
+    pub fn verify_create3(
+        &self,
+        factory: &[u8; 20],
+        proxyhash: &[u8; 32],
+        salt: &[u8; 32],
+        address: &[u8; 20],
+    ) -> bool {
+        use ethers::utils::keccak256;
+        // Step 1: proxy = CREATE2(factory, salt, proxyhash)
+        let mut pre = Vec::with_capacity(85);
+        pre.push(0xff);
+        pre.extend_from_slice(factory);
+        pre.extend_from_slice(salt);
+        pre.extend_from_slice(proxyhash);
+        let proxy = keccak256(&pre);
+        // Step 2: addr = RLP([proxy, nonce=1]) -> keccak -> low 20 bytes
+        let mut rlp = Vec::with_capacity(23);
+        rlp.push(0xd6);
+        rlp.push(0x94);
+        rlp.extend_from_slice(&proxy[12..32]);
+        rlp.push(0x01);
+        &keccak256(&rlp)[12..32] == address
     }
 
     /// Compile `src`, bind `inputs`/`lens`/an output buffer, dispatch the

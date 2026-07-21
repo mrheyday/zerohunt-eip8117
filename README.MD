@@ -188,6 +188,36 @@ Each extra leading-zero **byte** (2 nibbles) shaves ~12 gas per calldata
 reference. 12 nibbles (6 bytes) ≈ 2⁴⁸ salts — roughly a day on one modern GPU;
 8 nibbles (2³²) is minutes and the common cost/benefit sweet spot.
 
+### CREATE3 contract addresses (cross-chain, bytecode-independent)
+
+CREATE3 deploys a **constant proxy** via CREATE2, and the proxy does a nonce-1
+CREATE of your contract. Because the proxy init code is fixed, the final address
+depends only on **(factory, salt)** — *not* on your contract's bytecode or
+constructor args. So a mined salt yields the **same vanity address on every
+chain** that has the same factory (ideal for a deterministic executor
+address). This mode is also **keccak-only** (two keccaks per candidate, ~half
+the CREATE2 hashrate), and the salt is **public**.
+
+```bash
+nullforge-gpu 12 --create3 \
+  --factory              0x<your CREATE3 factory — 20 bytes> \
+  --proxy-init-code-hash 0x<keccak256(proxy init code) — 32 bytes, factory-specific>
+```
+
+Derivation:
+`proxy = keccak256(0xff ‖ factory ‖ salt ‖ proxy_init_code_hash)[12:]`, then
+`address = keccak256(0xd6 ‖ 0x94 ‖ proxy ‖ 0x01)[12:]` (the proxy's nonce-1
+CREATE). New bests append to `scanned_salts.txt`, same format as CREATE2.
+
+> ⚠️ **`--proxy-init-code-hash` is factory-specific.** It defaults to the
+> Solmate/0xSequence proxy hash
+> (`0x21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f`), but
+> **Solady** and **CreateX** differ, and **CreateX additionally guards the salt**
+> (mixing in `msg.sender` / a redeploy flag), which changes the salt→address
+> map entirely. Pass the hash for *your* factory. Every hit is re-derived
+> host-side (`verify_create3`), so a wrong hash fails loudly rather than mining
+> for the wrong address.
+
 ---
 
 ## CLI reference
@@ -197,6 +227,7 @@ reference. 12 nibbles (6 bytes) ≈ 2⁴⁸ salts — roughly a day on one moder
 | `nullforge [N] [--reveal]` | CPU miner. `N` = target leading-zero nibbles (default `8`, valid `1–40`). |
 | `nullforge-gpu [N] [--reveal]` | Unified CPU + GPU miner (Apple Metal). Same args. |
 | `nullforge-gpu [N] --create2 --deployer 0x.. --init-code-hash 0x..` | Mine a CREATE2 **salt** so a *contract* deploys to an N-leading-zero address (keccak-only; salt is public → plaintext `scanned_salts.txt`). |
+| `nullforge-gpu [N] --create3 --factory 0x.. [--proxy-init-code-hash 0x..]` | Mine a CREATE3 **salt** so a *contract* deploys to an N-leading-zero, **bytecode-independent** address (same on every chain with that factory). Proxy hash defaults to Solmate/0xSequence; override for Solady/CreateX. |
 | `nullforge-keygen` | One-time setup: prints the SECRET age identity to **stdout**, writes the PUBLIC recipient to `age-recipient.txt`. |
 | `nullforge-decrypt -i <identity> [file]` | Offline recovery: decrypts the key column of `scanned_keys.txt` (default `file`) with your secret identity. |
 
