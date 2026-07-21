@@ -46,7 +46,20 @@ fn main() {
         .unwrap_or_else(|| usage_exit());
     let input_path = input_path.unwrap_or_else(|| "scanned_keys.txt".to_string());
 
-    // Load the secret identity (first AGE-SECRET-KEY-1... line).
+    // Load the secret identity: read the file and take the first
+    // AGE-SECRET-KEY-1... line (age identity files may carry `#` comment lines).
+    let mut id_contents = std::fs::read_to_string(&identity_path).unwrap_or_else(|e| {
+        eprintln!("ERROR: cannot read identity file {identity_path}: {e}");
+        std::process::exit(1);
+    });
+    let id_line = id_contents
+        .lines()
+        .find(|l| l.trim_start().starts_with("AGE-SECRET-KEY-1"))
+        .map(str::trim)
+        .unwrap_or_else(|| {
+            eprintln!("ERROR: no AGE-SECRET-KEY-1... line found in {identity_path}");
+            std::process::exit(1);
+        });
     let identity = age::x25519::Identity::from_str(id_line).unwrap_or_else(|e| {
         eprintln!("ERROR: invalid age identity: {e}");
         std::process::exit(1);
