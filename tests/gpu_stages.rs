@@ -182,7 +182,10 @@ fn scalar_add_small_matches_host_mod_n() {
     let gpu = ctx.run_scalar_add_mod_n(&bases, &its);
     for (i, (b, it)) in bases.iter().zip(its.iter()).enumerate() {
         let want = addmod(*b, U256::from(*it), n);
-        assert_eq!(gpu[i], want, "scalar_add_small mismatch case {i}: base={b} it={it}");
+        assert_eq!(
+            gpu[i], want,
+            "scalar_add_small mismatch case {i}: base={b} it={it}"
+        );
     }
 
     // Explicit assertion that the wrap case actually wrapped (didn't just
@@ -224,8 +227,14 @@ fn incremental_walk_matches_k256() {
             if want_scalar.is_zero() {
                 // Degenerate point at infinity: GPU must emit the all-zero
                 // sentinel, not a fabricated address.
-                assert_eq!(gpu[bi][it as usize].0, [0u8; 32], "base {bi} it {it}: expected zero-sentinel privkey");
-                assert_eq!(gpu[bi][it as usize].1, [0u8; 20], "base {bi} it {it}: expected zero-sentinel address");
+                assert_eq!(
+                    gpu[bi][it as usize].0, [0u8; 32],
+                    "base {bi} it {it}: expected zero-sentinel privkey"
+                );
+                assert_eq!(
+                    gpu[bi][it as usize].1, [0u8; 20],
+                    "base {bi} it {it}: expected zero-sentinel address"
+                );
                 continue;
             }
             let mut want_bytes = [0u8; 32];
@@ -235,7 +244,11 @@ fn incremental_walk_matches_k256() {
 
             let (gpu_priv, gpu_addr) = gpu[bi][it as usize];
             assert_eq!(gpu_priv, want_bytes, "base {bi} it {it}: privkey mismatch");
-            assert_eq!(&gpu_addr[..], want_addr.as_bytes(), "base {bi} it {it}: address mismatch");
+            assert_eq!(
+                &gpu_addr[..],
+                want_addr.as_bytes(),
+                "base {bi} it {it}: address mismatch"
+            );
         }
     }
 
@@ -243,7 +256,10 @@ fn incremental_walk_matches_k256() {
     // n-2, n-1, 0 (degenerate), 1 -- assert the degenerate slot is exactly
     // it=2, proving the boundary was really exercised.
     let base = U256::from_big_endian(&bases[2]);
-    assert!(addmod(base, U256::from(2u32), n).is_zero(), "test setup: expected wrap at it=2");
+    assert!(
+        addmod(base, U256::from(2u32), n).is_zero(),
+        "test setup: expected wrap at it=2"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -374,7 +390,10 @@ fn mine_incremental_finds_and_verifies_low_threshold() {
     let hits = ctx.dispatch_mine_incremental(&seeds, &base, 4096, 2); // >=2 leading zero nibbles
     assert!(!hits.is_empty(), "should find >=2-zero addresses");
     for h in &hits {
-        assert!(ctx.verify_hit(h.privkey, h.address), "hit failed host re-derivation");
+        assert!(
+            ctx.verify_hit(h.privkey, h.address),
+            "hit failed host re-derivation"
+        );
         assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
     }
 }
@@ -531,7 +550,14 @@ fn createx_finds_and_verifies_low_threshold() {
         .collect();
     let base_counters: Vec<u64> = vec![0u64; n];
 
-    let hits = ctx.dispatch_createx(&CREATEX_ADDRESS, &proxy_hash, &base_salts, &base_counters, 4096, 2);
+    let hits = ctx.dispatch_createx(
+        &CREATEX_ADDRESS,
+        &proxy_hash,
+        &base_salts,
+        &base_counters,
+        4096,
+        2,
+    );
     assert!(!hits.is_empty(), "should find >=2-zero CreateX addresses");
 
     for h in &hits {
@@ -540,6 +566,65 @@ fn createx_finds_and_verifies_low_threshold() {
         assert!(
             ctx.verify_createx(&CREATEX_ADDRESS, &proxy_hash, &h.salt, &h.address),
             "GPU CreateX hit failed host re-derivation"
+        );
+        assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
+    }
+}
+
+#[test]
+fn create2tag_finds_and_verifies_low_threshold() {
+    let ctx = MetalContext::new();
+    let prefix = b"MevSafe.v2:";
+    let deployer: [u8; 20] = [0x11; 20];
+    let owner: [u8; 20] = [0x22; 20];
+    let permissions: [u8; 20] = [0x33; 20];
+    let factory: [u8; 20] = [0x44; 20];
+    let initcodehash: [u8; 32] = [0x55; 32];
+
+    let n = 256usize;
+    let base_tags: Vec<[u8; 32]> = (0..n)
+        .map(|i| {
+            let mut s = [0u8; 32];
+            s[0] = (i & 0xff) as u8;
+            s[1] = (i >> 8) as u8;
+            s[23] = 0x33;
+            s
+        })
+        .collect();
+    let base_counters: Vec<u64> = vec![0u64; n];
+
+    // >= 2 leading zero nibbles across 256*4096 candidates -> plenty of hits fast.
+    let hits = ctx.dispatch_create2tag(
+        prefix,
+        &deployer,
+        &owner,
+        &permissions,
+        &factory,
+        &initcodehash,
+        &base_tags,
+        &base_counters,
+        4096,
+        2,
+    );
+    assert!(
+        !hits.is_empty(),
+        "should find >=2-zero tagged-CREATE2 addresses"
+    );
+
+    for h in &hits {
+        // Host re-derivation gate (saltFor wrap -> abi.encode salt mix -> CREATE2).
+        assert!(
+            ctx.verify_create2tag(
+                prefix,
+                &deployer,
+                &owner,
+                &permissions,
+                &factory,
+                &initcodehash,
+                &h.tag,
+                &h.address
+            ),
+            "GPU tagged-CREATE2 hit failed host re-derivation"
         );
         assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
     }
