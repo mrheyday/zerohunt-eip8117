@@ -30,7 +30,10 @@ pub const C3_ITERS: u32 = 256;
 /// 1024-hit buffer cap).
 const C3_GPU_FLOOR: usize = 4;
 /// GPU duty-cycle target (fraction of wall-clock spent computing).
-const UTILIZATION: f64 = 0.80;
+/// Raised 0.80 → 0.97 to push the GPU harder during a mining sprint (leaves ~3%
+/// headroom so the system stays responsive). Correctness is unaffected — every
+/// GPU hit is re-verified against the two-step host keccak below (mismatch aborts).
+const UTILIZATION: f64 = 0.97;
 
 /// Threshold for the next batch: at least the floor, rising with the best; if
 /// the target is below the floor, clamp to it so low targets still surface.
