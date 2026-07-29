@@ -28,14 +28,21 @@ pub struct MetalContext {
 }
 
 /// CreateX (pcaversaccio) canonical cross-chain address — the CREATE2 deployer
-/// of the CREATE3 proxy, identical on every supported chain.
+/// of the CREATE3 proxy, identical on every chain that ran the Nick's-method
+/// pre-signed deploy. Source of truth:
+/// <https://github.com/pcaversaccio/createx> README pin
+/// `0xba5Ed099633D3B313e4D5F7bdc1305d3c28ba5Ed`. Override at runtime with
+/// `CREATEX_FACTORY` / `CREATEX_ADDRESS` (see `miner::createx`).
 pub const CREATEX_ADDRESS: [u8; 20] = [
     0xba, 0x5E, 0xd0, 0x99, 0x63, 0x3D, 0x3B, 0x31, 0x3e, 0x4D, 0x5F, 0x7b, 0xdc, 0x13, 0x05, 0xd3,
     0xc2, 0x8b, 0xa5, 0xEd,
 ];
 
-/// Standard CREATE3 proxy init-code hash (Solmate/0xSequence/CreateX all share
-/// the same 16-byte proxy `0x67363d3d37363d34f03d5260086018f3`).
+/// Standard CREATE3 proxy init-code hash.
+/// CreateX `proxyChildBytecode` = `hex"67_36_3d_3d_37_36_3d_34_f0_3d_52_60_08_60_18_f3"`
+/// (<https://github.com/pcaversaccio/createx> `src/CreateX.sol`); Solmate /
+/// 0xSequence share the same 16-byte proxy. `keccak256` of that bytecode:
+/// `0x21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f`.
 pub const STANDARD_CREATE3_PROXY_HASH: [u8; 32] = [
     0x21, 0xc3, 0x5d, 0xbe, 0x1b, 0x34, 0x4a, 0x24, 0x88, 0xcf, 0x33, 0x21, 0xd6, 0xce, 0x54, 0x2f,
     0x8e, 0x9f, 0x30, 0x55, 0x44, 0xff, 0x09, 0xe4, 0x99, 0x3a, 0x62, 0x31, 0x9a, 0x49, 0x7c, 0x1f,

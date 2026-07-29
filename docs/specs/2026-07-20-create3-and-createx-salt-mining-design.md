@@ -52,10 +52,10 @@ All three derivation vectors were cross-checked **twice**, independently:
 against Alloy's `Address::create2`/`create` (in `tests/create3_derivation.rs`) and
 against `sha3::Keccak256` (a separate library):
 
-| vector | inputs | address |
-|---|---|---|
-| create2 | deployer `0x4e59…956C`, salt `0x11..`, ich `0x22..` | `0x95C86910…44Ab8FC3` |
-| create3 | factory `0x00..42`, salt `0x33..`, standard proxy | `0xA263972e…532C70dC` |
+| vector  | inputs                                               | address               |
+| ------- | ---------------------------------------------------- | --------------------- |
+| create2 | deployer `0x4e59…956C`, salt `0x11..`, ich `0x22..`  | `0x95C86910…44Ab8FC3` |
+| create3 | factory `0x00..42`, salt `0x33..`, standard proxy    | `0xA263972e…532C70dC` |
 | createx | CreateX, `guarded=keccak256(0x55..)`, standard proxy | `0x6AB36888…9ffe6967` |
 
 ## Implementation

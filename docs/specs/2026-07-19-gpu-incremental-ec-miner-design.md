@@ -20,11 +20,11 @@ batch's candidates.
 
 Rough field-multiplication counts per candidate:
 
-| Path | Scalar mult | Inversion | Total (approx) |
-|---|---|---|---|
-| Approach A (today) | ~4000+ (256-step double-and-add) | ~260 (Fermat) | ~4300+ |
-| **B1 (this spec)**: incremental walk, per-candidate inversion | one `j_add` (~16) | ~260 (Fermat) | **~275 → ~15x over A** |
-| B2 (future): batch-inverted B1 | ~16 | ~20 (amortized) | ~35 → another ~8-10x |
+| Path                                                          | Scalar mult                      | Inversion       | Total (approx)         |
+| ------------------------------------------------------------- | -------------------------------- | --------------- | ---------------------- |
+| Approach A (today)                                            | ~4000+ (256-step double-and-add) | ~260 (Fermat)   | ~4300+                 |
+| **B1 (this spec)**: incremental walk, per-candidate inversion | one `j_add` (~16)                | ~260 (Fermat)   | **~275 → ~15x over A** |
+| B2 (future): batch-inverted B1                                | ~16                              | ~20 (amortized) | ~35 → another ~8-10x   |
 
 B1 alone is the big win, because dropping the scalar-mult makes the per-candidate
 inversion the new bottleneck. B2 (Montgomery batch inversion across a sub-batch
@@ -56,7 +56,7 @@ Per thread, per **batch** (not per candidate):
    as a 256-bit add followed by **at most one** conditional subtraction of `n`
    (valid because `base < n` and `it < ITERS_PER_BATCH ≪ n`, so `base + it < 2n`).
 
-This reuses the *exact same* seed/counter derivation, buffer layout, and
+This reuses the _exact same_ seed/counter derivation, buffer layout, and
 per-hit host-side `k256` verification gate as Approach A — `gpu_driver.rs`
 changes only in which kernel entry point it dispatches. The alternative
 (carrying Jacobian state across dispatches, an unbounded walk) is rejected:
@@ -85,7 +85,7 @@ hand-waving it:**
   individually a uniform, unpredictable 256-bit scalar (mod the negligible
   batch-skip case above).
 - The actual security invariant is **base-scalar secrecy + DLP hardness**, with
-  the *correlation set* bounded to `ITERS` keys (currently 256) sharing one
+  the _correlation set_ bounded to `ITERS` keys (currently 256) sharing one
   base. This is a materially different, and strictly weaker, model than "every
   key is an independent oracle output" — smaller `ITERS` shrinks the
   correlation set at the cost of amortizing the scalar-mult over fewer

@@ -1,19 +1,31 @@
 // CreateX (pcaversaccio) permissionless CREATE3 vanity salt mining.
 //
-// CreateX is the widely-deployed cross-chain deployer at a fixed address on
-// every chain. Its `deployCreate3(salt, initCode)` GUARDS the salt before the
-// CREATE3 deployment, so the effective CREATE2 salt is not the raw salt you
-// pass. For the permissionless / cross-chain case (salt[0:20] is neither the
-// caller nor the zero-address sentinel, i.e. CreateX's `SenderBytes.Random`),
-// the guard is simply:
+// Algorithm source (AGPL-3.0-only):
+//   https://github.com/pcaversaccio/createx
+//   src/CreateX.sol — deployCreate3 / _guard / proxyChildBytecode
+//
+// CreateX is the widely-deployed cross-chain deployer. Canonical Nick's-method
+// address (README pin): 0xba5Ed099633D3B313e4D5F7bdc1305d3c28ba5Ed. Host may
+// override the factory buffer (CREATEX_FACTORY / CREATEX_ADDRESS) for a
+// project-local CreateX redeploy — CREATE3 math is identical; only the factory
+// 20-byte identity changes.
+//
+// `deployCreate3(salt, initCode)` GUARDS the salt before CREATE3, so the
+// effective CREATE2 salt is not the raw salt you pass. For the permissionless
+// / cross-chain case (salt[0:20] is neither the caller nor the zero-address
+// sentinel, i.e. CreateX's `SenderBytes.Random`), the guard is simply:
 //
 //   guardedSalt = keccak256(abi.encode(salt)) = keccak256(salt)   // 32-byte preimage
 //
-// Then CreateX deploys the standard CREATE3 proxy (same 16-byte init code as
-// Solmate/0xSequence) FROM ITS OWN ADDRESS:
+// Then CreateX deploys the standard CREATE3 proxy (proxyChildBytecode
+// hex"67_36_3d_3d_37_36_3d_34_f0_3d_52_60_08_60_18_f3" — same as Solmate /
+// 0xSequence) FROM ITS OWN ADDRESS:
 //
 //   proxy = keccak256(0xff ‖ CREATEX ‖ guardedSalt ‖ PROXY_INITCODEHASH)[12:]
 //   addr  = keccak256(0xd6 ‖ 0x94 ‖ proxy ‖ 0x01)[12:]
+//
+// PROXY_INITCODEHASH = keccak256(proxyChildBytecode)
+//   = 0x21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f
 //
 // The emitted value is the ORIGINAL salt (what you pass to
 // `CreateX.deployCreate3`) — the guard is re-applied on-chain. This variant

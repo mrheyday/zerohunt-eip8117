@@ -4,7 +4,7 @@
 
 **Goal:** One process (`nullforge-gpu`) that mines Ethereum addresses on the CPU and GPU together against a single shared best-tracker, streaming strictly-increasing "new best" leading-zero records in ERC-8117 notation, stopping at `target_zeros`.
 
-**Architecture:** A `nullforge::miner` library module holds the shared state + reporting funnel (`report_hit`), the CPU worker loop, and the GPU driver loop; each is unit-testable in isolation. `src/bin/gpu.rs` is thin wiring: parse args, build shared state, spawn `~80%·num_cpus` CPU workers + one GPU-driver thread + a rate reporter + a Ctrl-C handler, join, print the final summary. Every GPU hit is re-verified against `k256` (hard-abort on mismatch). This is Stage 1 of the spec; it runs on the *current* `mine` kernel and does not change any `.metal` code.
+**Architecture:** A `nullforge::miner` library module holds the shared state + reporting funnel (`report_hit`), the CPU worker loop, and the GPU driver loop; each is unit-testable in isolation. `src/bin/gpu.rs` is thin wiring: parse args, build shared state, spawn `~80%·num_cpus` CPU workers + one GPU-driver thread + a rate reporter + a Ctrl-C handler, join, print the final summary. Every GPU hit is re-verified against `k256` (hard-abort on mismatch). This is Stage 1 of the spec; it runs on the _current_ `mine` kernel and does not change any `.metal` code.
 
 **Tech Stack:** Rust, `tokio` (rt-multi-thread, signal), `metal` (Apple Metal compute), `ethers`/`k256` (secp256k1 + address + verification), existing `nullforge::erc8117` and `nullforge::gpu` modules.
 
@@ -41,6 +41,7 @@ The `mine` kernel (`kernels/miner.metal`), `MetalContext::dispatch_mine`, and `s
 ### Task 1: `miner::shared` — state + `report_hit` funnel
 
 **Files:**
+
 - Create: `src/miner/mod.rs`
 - Create: `src/miner/shared.rs`
 - Modify: `src/lib.rs` (add `pub mod miner;`)
@@ -48,6 +49,7 @@ The `mine` kernel (`kernels/miner.metal`), `MetalContext::dispatch_mine`, and `s
 - Test: inline `#[cfg(test)] mod tests` in `src/miner/shared.rs`
 
 **Interfaces:**
+
 - Consumes: `nullforge::erc8117::{format_address, format_both, Mode}`.
 - Produces:
   - `enum Engine { Cpu, Gpu }` with `fn label(self) -> &'static str`
@@ -341,11 +343,13 @@ git commit -m "feat(miner): shared state + report_hit funnel (ERC-8117, strictly
 ### Task 2: `miner::cpu` — worker loop + zero-count helper
 
 **Files:**
+
 - Create: `src/miner/cpu.rs`
 - Modify: `src/miner/mod.rs` (uncomment `pub mod cpu;`)
 - Test: inline `#[cfg(test)] mod tests` in `src/miner/cpu.rs`
 
 **Interfaces:**
+
 - Consumes: `MinerShared`, `Engine` from `crate::miner::shared`; `ethers::utils::secret_key_to_address`; `ethers::core::k256::ecdsa::SigningKey`.
 - Produces:
   - `fn leading_zero_nibbles(addr: &[u8]) -> usize`
@@ -458,11 +462,13 @@ git commit -m "feat(miner): CPU worker loop + leading-zero-nibble helper"
 ### Task 3: `miner::gpu_driver` — batch loop + verify/abort gate
 
 **Files:**
+
 - Create: `src/miner/gpu_driver.rs`
 - Modify: `src/miner/mod.rs` (uncomment `pub mod gpu_driver;`)
 - Test: inline `#[cfg(test)] mod tests` in `src/miner/gpu_driver.rs` (no GPU needed — tests the verify decision logic only)
 
 **Interfaces:**
+
 - Consumes: `crate::gpu::{MetalContext, Hit}`; `crate::miner::shared::{Engine, MinerShared}`; `crate::miner::cpu::leading_zero_nibbles`; `ethers::types::Address`.
 - Produces:
   - `const N_THREADS: usize = 65536; const ITERS: u32 = 256; const GPU_FLOOR: usize = 4;`
@@ -606,9 +612,11 @@ git commit -m "feat(miner): GPU driver batch loop + verify-or-abort gate + thres
 ### Task 4: `src/bin/gpu.rs` — host wiring (the working tool)
 
 **Files:**
+
 - Modify: `src/bin/gpu.rs` (replace the placeholder entirely)
 
 **Interfaces:**
+
 - Consumes: `nullforge::miner::shared::{Engine, MinerShared}`, `nullforge::miner::cpu::cpu_worker`, `nullforge::miner::gpu_driver::{run_batches, N_THREADS}`, `nullforge::gpu::MetalContext`, `nullforge::erc8117`.
 - Produces: the `nullforge-gpu` binary. No new library symbols.
 
@@ -755,9 +763,11 @@ Expected: compiles cleanly (warnings from transitive deps are fine).
 - [ ] **Step 3: Smoke-run to a small target and confirm output shape**
 
 Run (finds quickly, low target):
+
 ```bash
 cd "$(git rev-parse --show-toplevel)" && rm -f scanned_keys.txt && timeout 60 ./target/debug/nullforge-gpu 4; echo "exit: $?"
 ```
+
 Expected: at least one `New best [CPU|GPU] N leading zeros: 0x0₄…  (0x0(4)…)` line; a final `Found wallet …` block with raw + ERC-8117 + private key; and `scanned_keys.txt` containing a subscript, non-truncated address column. (Exit 0 on natural finish at 4; 124 if `timeout` fired — re-run with a lower target if so.)
 
 - [ ] **Step 4: Commit**
@@ -772,9 +782,11 @@ git commit -m "feat(gpu-bin): unified CPU+GPU miner host loop + CLI + ERC-8117 o
 ### Task 5: GPU-gated end-to-end integration test
 
 **Files:**
+
 - Modify: `tests/gpu_stages.rs` (append a new test)
 
 **Interfaces:**
+
 - Consumes: `nullforge::gpu::MetalContext`, `nullforge::miner::shared::MinerShared`, `nullforge::miner::gpu_driver::run_batches`.
 
 - [ ] **Step 1: Write the failing (or device-skipped) test**
@@ -837,6 +849,7 @@ git commit -m "test(miner): GPU-gated e2e — driver finds, verifies, reports, s
 ## Self-Review
 
 **Spec coverage:**
+
 - Unified process, CPU workers + GPU driver + shared best-tracker → Tasks 1–4. ✓
 - Strictly-increasing "new best" reporting (leading-zeros only) → `report_hit` (Task 1), tested. ✓
 - ERC-8117 output (console both-truncated; file subscript-non-truncated; final raw+both) → Task 1 + Task 4. ✓
