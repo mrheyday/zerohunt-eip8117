@@ -5,13 +5,13 @@ Nullforge’s `--createx` mode mines **permissionless CREATE3** vanity salts for
 
 ## Upstream
 
-| Item | Value |
-|------|--------|
-| Repo | https://github.com/pcaversaccio/createx |
-| Contract | `src/CreateX.sol` |
-| Interface | `src/ICreateX.sol` |
+| Item              | Value                                                                                                    |
+| ----------------- | -------------------------------------------------------------------------------------------------------- |
+| Repo              | https://github.com/pcaversaccio/createx                                                                  |
+| Contract          | `src/CreateX.sol`                                                                                        |
+| Interface         | `src/ICreateX.sol`                                                                                       |
 | Canonical address | `0xba5Ed099633D3B313e4D5F7bdc1305d3c28ba5Ed` (Nick’s method, every chain that ran the pre-signed deploy) |
-| License | AGPL-3.0-only |
+| License           | AGPL-3.0-only                                                                                            |
 
 ## What we implement
 
@@ -43,11 +43,11 @@ nullforge-gpu 8 --createx
 
 ## Files
 
-| Path | Role |
-|------|------|
-| `kernels/createx.metal` | GPU: guard + CREATE3 |
-| `src/miner/createx.rs` | Host driver + factory resolve |
-| `src/gpu/mod.rs` | `CREATEX_ADDRESS`, `STANDARD_CREATE3_PROXY_HASH`, verify |
+| Path                    | Role                                                     |
+| ----------------------- | -------------------------------------------------------- |
+| `kernels/createx.metal` | GPU: guard + CREATE3                                     |
+| `src/miner/createx.rs`  | Host driver + factory resolve                            |
+| `src/gpu/mod.rs`        | `CREATEX_ADDRESS`, `STANDARD_CREATE3_PROXY_HASH`, verify |
 
 Do **not** invent a second CREATE3 formula — re-diff against
 `CreateX.sol` if upstream changes `proxyChildBytecode` or `_guard`.

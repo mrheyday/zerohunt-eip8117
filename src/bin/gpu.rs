@@ -19,9 +19,12 @@ use nullforge::miner::cpu::cpu_worker;
 use nullforge::miner::gpu_driver::{run_batches, N_THREADS};
 use nullforge::miner::shared::MinerShared;
 
-/// CPU workers = round(num_cpus * UTILIZATION); ~20% of cores left for the
-/// system + the (I/O-bound) GPU driver thread.
-const UTILIZATION: f64 = 0.80;
+/// GPU is the PRIMARY engine; the CPU runs only a small SUPPORT pool. The GPU
+/// dwarfs the CPU (~0.19 vs multiple Mkeys/s) and every worker competes with the
+/// GPU driver thread for a core — leaving <2 cores free starves the GPU to ~0.
+/// So default to a tiny support count, freeing the rest of the chip for the GPU
+/// driver + OS. Integer-only, no float. Override with NULLFORGE_CPU_WORKERS.
+const CPU_SUPPORT_WORKERS: usize = 2;
 
 #[tokio::main]
 async fn main() {
@@ -217,7 +220,12 @@ async fn main() {
         );
     }
 
-    let cpu_workers = ((num_cpus::get() as f64) * UTILIZATION).round().max(1.0) as usize;
+    let cores = num_cpus::get();
+    let cpu_workers = std::env::var("NULLFORGE_CPU_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(CPU_SUPPORT_WORKERS)
+        .clamp(1, cores);
     println!(
         "nullforge-gpu: {cpu_workers} CPU workers + GPU, finding an address with {target} leading zeros"
     );

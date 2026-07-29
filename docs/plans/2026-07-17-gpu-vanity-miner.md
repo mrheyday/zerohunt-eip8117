@@ -36,6 +36,7 @@
 ### Task 1: Binary scaffold + Metal harness (prove the plumbing)
 
 **Files:**
+
 - Modify: `Cargo.toml`
 - Create: `src/lib.rs`
 - Create: `src/gpu/mod.rs`
@@ -44,6 +45,7 @@
 - Create: `tests/gpu_stages.rs`
 
 **Interfaces:**
+
 - Produces:
   - `gpu::MetalContext::new() -> MetalContext` — holds `device: metal::Device`, `queue: metal::CommandQueue`.
   - `MetalContext::run_u32_kernel(&self, src: &str, entry: &str, out_len: usize, tgroups: u64, tperg: u64) -> Vec<u32>` — compiles `src`, dispatches `entry` over `tgroups*tperg` threads, returns the `out_len`-element `u32` output buffer.
@@ -71,6 +73,7 @@ metal = "0.33.0"
 - [ ] **Step 2: Write the echo kernel**
 
 `kernels/echo.metal`:
+
 ```metal
 #include <metal_stdlib>
 using namespace metal;
@@ -84,6 +87,7 @@ kernel void echo(device uint* out [[buffer(0)]],
 - [ ] **Step 3: Write the failing test**
 
 `tests/gpu_stages.rs`:
+
 ```rust
 use nullforge::gpu::MetalContext;
 
@@ -107,11 +111,13 @@ Expected: FAIL to compile — `nullforge::gpu` / `MetalContext` not defined.
 - [ ] **Step 5: Implement `src/lib.rs` and `src/gpu/mod.rs`**
 
 `src/lib.rs`:
+
 ```rust
 pub mod gpu;
 ```
 
 `src/gpu/mod.rs`:
+
 ```rust
 use metal::{Device, CommandQueue, MTLResourceOptions, MTLSize, CompileOptions};
 
@@ -197,11 +203,13 @@ git commit -m "feat(gpu): Metal compute harness + echo-kernel gate"
 ### Task 2: Keccak-256 MSL kernel (verified vs `ethers::utils::keccak256`)
 
 **Files:**
+
 - Create: `kernels/keccak.metal`
 - Modify: `src/gpu/mod.rs` (add `run_keccak(&self, inputs: &[[u8; N]]) -> Vec<[u8;32]>` byte-buffer dispatch helper)
 - Modify: `tests/gpu_stages.rs`
 
 **Interfaces:**
+
 - Consumes: `MetalContext` (Task 1).
 - Produces:
   - MSL device function `void keccak256(thread const uchar* in, uint inlen, thread uchar* out32)` in `kernels/keccak.metal`.
@@ -211,6 +219,7 @@ git commit -m "feat(gpu): Metal compute harness + echo-kernel gate"
 - [ ] **Step 1: Write the failing test** (GPU Keccak == host Keccak for empty, "abc", and 64 random bytes)
 
 Add to `tests/gpu_stages.rs`:
+
 ```rust
 #[test]
 fn keccak_matches_host_reference() {
@@ -238,6 +247,7 @@ Expected: FAIL — `run_keccak_fixed64` not defined.
 Implement Keccak-f[1600] (the Ethereum Keccak-256: rate 1088 bits / 136 bytes, capacity 512, `0x01` domain-suffix pad — NOT the `0x06` SHA3 pad, output 32 bytes). Provide the 24-round permutation with the standard RC[24] round constants and rho-offsets. Device function signature `keccak256(thread const uchar* in, uint inlen, thread uchar* out32)` for `inlen <= 135` (single block; sufficient for all uses here: 32-byte seed+8-byte counter = 40 bytes, and 64-byte pubkey). The `keccak_test` kernel copies the `gid`-th 64-byte-strided input + its length into thread memory and calls it.
 
 The round constants (paste verbatim into the kernel):
+
 ```metal
 constant ulong RC[24] = {
   0x0000000000000001UL,0x0000000000008082UL,0x800000000000808aUL,0x8000000080008000UL,
@@ -248,6 +258,7 @@ constant ulong RC[24] = {
   0x8000000080008081UL,0x8000000000008080UL,0x0000000080000001UL,0x8000000080008008UL
 };
 ```
+
 (Standard theta/rho/pi/chi/iota over a `ulong state[25]`; absorb `inlen` bytes little-endian into the state, XOR `0x01` at byte `inlen` and `0x80` at byte 135, permute once, squeeze first 32 bytes little-endian.)
 
 - [ ] **Step 4: Add `run_keccak_fixed64` to `src/gpu/mod.rs`**
@@ -272,6 +283,7 @@ impl MetalContext {
     }
 }
 ```
+
 Implement `dispatch_keccak` mirroring `run_u32_kernel` but binding three shared buffers (`inputs` u8, `lens` u32, `out` u8[n*32]) and dispatching `n` threads; return `Vec<[u8;32]>`. `KECCAK_TEST_ENTRY` is the `kernel void keccak_test(...)` wrapper string (or place it directly in `keccak.metal`).
 
 - [ ] **Step 5: Run test to verify it passes**
@@ -291,11 +303,13 @@ git commit -m "feat(gpu): Keccak-256 MSL kernel verified vs host reference"
 ### Task 3: secp256k1 field arithmetic MSL (mod p: add/sub/mul/inv)
 
 **Files:**
+
 - Create: `kernels/field.metal`
 - Modify: `src/gpu/mod.rs` (add `run_field_op` helper dispatching a[256] op b[256] -> out[256])
 - Modify: `tests/gpu_stages.rs`
 
 **Interfaces:**
+
 - Produces MSL device functions over `typedef struct { uint v[8]; } fe;` (8×u32 limbs, little-endian limb order, value mod `p`):
   - `fe fe_add(fe a, fe b)`, `fe fe_sub(fe a, fe b)`, `fe fe_mul(fe a, fe b)`, `fe fe_inv(fe a)` (Fermat: `a^(p-2) mod p`).
   - `kernel void field_test(device const uint* a, device const uint* b, device uint* out, device const uint* op, uint gid)` — applies `op` (0=add,1=sub,2=mul,3=inv) to the `gid`-th 8-limb operand pair.
@@ -304,6 +318,7 @@ git commit -m "feat(gpu): Keccak-256 MSL kernel verified vs host reference"
 - [ ] **Step 1: Write the failing test** (GPU field ops == host big-int mod p, computed with a tiny host helper using `k256`'s `U256`/`ethers::types::U256`)
 
 Add to `tests/gpu_stages.rs` a host reference using `ethers::types::U256` for add/sub/mul mod p and a modpow for inverse:
+
 ```rust
 #[test]
 fn field_ops_match_host_mod_p() {
@@ -331,6 +346,7 @@ fn field_ops_match_host_mod_p() {
     }
 }
 ```
+
 Include `mulmod`/`modpow`/`run_field` (U256<->[u32;8] LE marshalling) as test-module helpers. `run_field(a,b,op) -> U256` dispatches `field_test` for one operand pair and reads back 8 limbs.
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -341,6 +357,7 @@ Expected: FAIL — `run_field`/kernel absent.
 - [ ] **Step 3: Write `kernels/field.metal`**
 
 Implement 8×u32-limb arithmetic mod `p`:
+
 - `p` as `constant uint P[8]` (little-endian limbs: `{0xFFFFFC2F,0xFFFFFFFE,0xFFFFFFFF,0xFFFFFFFF,0xFFFFFFFF,0xFFFFFFFF,0xFFFFFFFF,0xFFFFFFFF}`).
 - `fe_add`: schoolbook add with carry (`uint`, detect carry), then conditional subtract `P` if `>= P`.
 - `fe_sub`: add `P` then subtract `b` with borrow (keeps non-negative), conditional subtract `P`.
@@ -364,11 +381,13 @@ git commit -m "feat(gpu): secp256k1 field arithmetic MSL verified mod p"
 ### Task 4: secp256k1 EC scalar-mult MSL (privkey·G == k256 pubkey)
 
 **Files:**
+
 - Create: `kernels/ec.metal`
 - Modify: `src/gpu/mod.rs` (add `run_scalarmul(&self, keys: &[[u8;32]]) -> Vec<[u8;64]>` returning affine x‖y)
 - Modify: `tests/gpu_stages.rs`
 
 **Interfaces:**
+
 - Consumes: `fe`/`fe_*` from Task 3 (concatenated source), `P`/constants.
 - Produces MSL:
   - `struct jpoint { fe X, Y, Z; }`, `jpoint j_double(jpoint)`, `jpoint j_add(jpoint, jpoint)` (Jacobian), `void scalarmul(fe k, thread fe& outx, thread fe& outy)` (double-and-add over `G`, final `fe_inv(Z)`→affine).
@@ -397,6 +416,7 @@ fn scalarmul_matches_k256_pubkey() {
     }
 }
 ```
+
 (`hex_to_32` test helper.)
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -427,11 +447,13 @@ git commit -m "feat(gpu): secp256k1 Jacobian scalar-mult verified vs k256"
 ### Task 5: Full derive→address pipeline kernel + host correctness gate
 
 **Files:**
+
 - Create: `kernels/miner.metal`
 - Modify: `src/gpu/mod.rs` (add `derive_address_gpu(&self, seeds:&[[u8;32]], counters:&[u64]) -> Vec<([u8;32],[u8;20])>` for the gate test; and `verify_hit(privkey,address) -> bool` host helper)
 - Modify: `tests/gpu_stages.rs`
 
 **Interfaces:**
+
 - Consumes: keccak (T2), field (T3), ec (T4) — all four `.metal` files concatenated into one compile unit.
 - Produces MSL:
   - device `fe derive_privkey(thread const uchar seed[32], ulong counter)` = `keccak256(seed‖counter_le8)` as `fe` scalar; caller applies the range guard.
@@ -483,12 +505,14 @@ git commit -m "feat(gpu): full derive->address pipeline verified vs k256"
 ### Task 6: Miner host loop + CLI (the working tool)
 
 **Files:**
+
 - Modify: `src/bin/gpu.rs` (full implementation)
 - Modify: `kernels/miner.metal` (add the searching `kernel void mine(...)` with zero-count + atomic hit output)
 - Modify: `src/gpu/mod.rs` (add `dispatch_mine(...) -> Vec<Hit>`)
 - Modify: `tests/gpu_stages.rs` (add a low-threshold end-to-end test)
 
 **Interfaces:**
+
 - Consumes: everything above.
 - Produces:
   - MSL `kernel void mine(device const uchar* seeds, device const ulong* base_counters, constant uint& iters, constant uint& threshold, device atomic_uint* hit_count, device uchar* hits, uint gid)` — each thread loops `iters`: derive (with 0/`>=n` guard), scalar-mult, address, count leading-zero nibbles; on `>= threshold` atomically append `{priv[32],addr[20],zeros(1),pad}` to `hits` (bounded capacity, e.g. 1024).
@@ -578,6 +602,7 @@ fn main() {
     }
 }
 ```
+
 (Provide `report`, `ctrlc_like`, and the `scanned_keys.txt` writer mirroring `src/main.rs`'s format. Re-seed periodically is unnecessary — counters advance the domain; seeds are already full-entropy.)
 
 - [ ] **Step 6: Build + smoke-run**
