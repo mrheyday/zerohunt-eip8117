@@ -329,6 +329,15 @@ kernel void mine(device const uchar* seeds [[buffer(0)]],
 // `mine_incremental_raw_test` and `mine` above -- are already in scope;
 // Metal, like C/C++, requires a symbol's declaration to precede its use
 // within a translation unit.
+// Approach B2 sub-batch size: the number of incremental-walk points whose
+// Z-coordinates are inverted together with ONE fe_inv via Montgomery's trick
+// (instead of one fe_inv per candidate). Tunable; a short final sub-batch is
+// handled, so it need not divide `iters`. Larger = better inversion
+// amortization but more thread-private memory (each stored point is 3*fe = 96
+// bytes, plus the prefix/inverse scratch). `#define` (not `constant`) so it is
+// unambiguously a compile-time array bound in MSL.
+#define B2_SUBBATCH 8
+
 kernel void mine_incremental(device const uchar* seeds [[buffer(0)]],
                               device const ulong* base_counters [[buffer(1)]],
                               constant uint& iters [[buffer(2)]],
@@ -350,47 +359,104 @@ kernel void mine_incremental(device const uchar* seeds [[buffer(0)]],
     jpoint P = scalarmul_jacobian(base);
     jpoint G = g_point();
 
-    for (uint it = 0; it < iters; it++) {
-        if (it > 0) {
-            P = j_add(P, G);
-        }
-        if (fe_is_zero(P.Z)) {
-            continue; // base+it == 0 (mod n): invalid scalar, skip candidate
+    // fe multiplicative identity (fe is a plain, NON-Montgomery residue, so 1
+    // is the identity) -- substituted for skipped (point-at-infinity) Z's so a
+    // single degenerate candidate cannot zero the whole sub-batch product.
+    fe fe_one;
+    fe_one.v[0] = 1u;
+    for (int i = 1; i < 8; i++) {
+        fe_one.v[i] = 0u;
+    }
+
+    // Approach B2: walk in sub-batches of up to B2_SUBBATCH candidates, doing
+    // ONE Montgomery batch inversion of their Jacobian Z's per sub-batch instead
+    // of one Fermat fe_inv per candidate (the B1 bottleneck).
+    uint it = 0;
+    while (it < iters) {
+        uint k = min((uint)B2_SUBBATCH, iters - it); // candidates in this sub-batch
+
+        thread fe   sbX[B2_SUBBATCH];
+        thread fe   sbY[B2_SUBBATCH];
+        thread fe   sbZ[B2_SUBBATCH];   // fe_one substituted for skipped slots
+        thread uint sbIt[B2_SUBBATCH];  // candidate's `it` (for the privkey)
+        thread bool sbSkip[B2_SUBBATCH];
+
+        // Advance the walk k steps, snapshotting each point. `it == 0` is
+        // base*G (no add); every later step (including the first of each later
+        // sub-batch) adds G. A point at infinity (Z == 0, i.e. base+it == 0 mod
+        // n) is snapshotted but marked skip and kept out of the batch product;
+        // the walk still adds G to it (j_add handles the infinity operand).
+        for (uint j = 0; j < k; j++) {
+            if (it + j > 0) {
+                P = j_add(P, G);
+            }
+            sbIt[j] = it + j;
+            sbX[j] = P.X;
+            sbY[j] = P.Y;
+            if (fe_is_zero(P.Z)) {
+                sbSkip[j] = true;
+                sbZ[j] = fe_one;
+            } else {
+                sbSkip[j] = false;
+                sbZ[j] = P.Z;
+            }
         }
 
-        fe zinv = fe_inv(P.Z);
-        fe zinv2 = fe_mul(zinv, zinv);
-        fe zinv3 = fe_mul(zinv2, zinv);
-        fe x = fe_mul(P.X, zinv2);
-        fe y = fe_mul(P.Y, zinv3);
+        // Montgomery batch inversion: sbInv[j] = sbZ[j]^-1 for all j, one fe_inv.
+        thread fe sbPre[B2_SUBBATCH];
+        sbPre[0] = sbZ[0];
+        for (uint j = 1; j < k; j++) {
+            sbPre[j] = fe_mul(sbPre[j - 1], sbZ[j]);
+        }
+        fe acc = fe_inv(sbPre[k - 1]); // (sbZ[0]*...*sbZ[k-1])^-1
+        thread fe sbInv[B2_SUBBATCH];
+        for (int j = (int)k - 1; j >= 1; j--) {
+            sbInv[j] = fe_mul(acc, sbPre[j - 1]); // = sbZ[j]^-1
+            acc = fe_mul(acc, sbZ[j]);            // strip sbZ[j]: -> (sbZ[0]..sbZ[j-1])^-1
+        }
+        sbInv[0] = acc;
 
-        thread uchar addr[20];
-        pubkey_to_address(x, y, addr);
+        // Affine-convert (with the precomputed inverse), hash, threshold, emit.
+        for (uint j = 0; j < k; j++) {
+            if (sbSkip[j]) {
+                continue; // point at infinity: invalid scalar, skip candidate
+            }
+            fe zinv = sbInv[j];
+            fe zinv2 = fe_mul(zinv, zinv);
+            fe zinv3 = fe_mul(zinv2, zinv);
+            fe x = fe_mul(sbX[j], zinv2);
+            fe y = fe_mul(sbY[j], zinv3);
 
-        uint zeros = leading_zero_nibbles(addr);
-        if (zeros < threshold) {
-            continue;
+            thread uchar addr[20];
+            pubkey_to_address(x, y, addr);
+
+            uint zeros = leading_zero_nibbles(addr);
+            if (zeros < threshold) {
+                continue;
+            }
+
+            fe priv = scalar_add_small(base, sbIt[j]);
+
+            uint idx = atomic_fetch_add_explicit(hit_count, 1u, memory_order_relaxed);
+            if (idx >= MAX_HITS) {
+                continue; // batch saturated; drop (host clamps its read too)
+            }
+
+            thread uchar privBytes[32];
+            fe_to_bytes_be(priv, privBytes);
+            uint out = idx * HIT_STRIDE;
+            for (uint i = 0; i < 32; i++) {
+                hits[out + i] = privBytes[i];
+            }
+            for (uint i = 0; i < 20; i++) {
+                hits[out + 32 + i] = addr[i];
+            }
+            hits[out + 52] = (uchar)zeros;
+            for (uint i = 53; i < HIT_STRIDE; i++) {
+                hits[out + i] = 0;
+            }
         }
 
-        fe priv = scalar_add_small(base, it);
-
-        uint idx = atomic_fetch_add_explicit(hit_count, 1u, memory_order_relaxed);
-        if (idx >= MAX_HITS) {
-            continue; // batch saturated; drop (host clamps its read too)
-        }
-
-        thread uchar privBytes[32];
-        fe_to_bytes_be(priv, privBytes);
-        uint out = idx * HIT_STRIDE;
-        for (uint i = 0; i < 32; i++) {
-            hits[out + i] = privBytes[i];
-        }
-        for (uint i = 0; i < 20; i++) {
-            hits[out + 32 + i] = addr[i];
-        }
-        hits[out + 52] = (uchar)zeros;
-        for (uint i = 53; i < HIT_STRIDE; i++) {
-            hits[out + i] = 0;
-        }
+        it += k;
     }
 }
