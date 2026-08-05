@@ -182,7 +182,10 @@ fn scalar_add_small_matches_host_mod_n() {
     let gpu = ctx.run_scalar_add_mod_n(&bases, &its);
     for (i, (b, it)) in bases.iter().zip(its.iter()).enumerate() {
         let want = addmod(*b, U256::from(*it), n);
-        assert_eq!(gpu[i], want, "scalar_add_small mismatch case {i}: base={b} it={it}");
+        assert_eq!(
+            gpu[i], want,
+            "scalar_add_small mismatch case {i}: base={b} it={it}"
+        );
     }
 
     // Explicit assertion that the wrap case actually wrapped (didn't just
@@ -224,8 +227,14 @@ fn incremental_walk_matches_k256() {
             if want_scalar.is_zero() {
                 // Degenerate point at infinity: GPU must emit the all-zero
                 // sentinel, not a fabricated address.
-                assert_eq!(gpu[bi][it as usize].0, [0u8; 32], "base {bi} it {it}: expected zero-sentinel privkey");
-                assert_eq!(gpu[bi][it as usize].1, [0u8; 20], "base {bi} it {it}: expected zero-sentinel address");
+                assert_eq!(
+                    gpu[bi][it as usize].0, [0u8; 32],
+                    "base {bi} it {it}: expected zero-sentinel privkey"
+                );
+                assert_eq!(
+                    gpu[bi][it as usize].1, [0u8; 20],
+                    "base {bi} it {it}: expected zero-sentinel address"
+                );
                 continue;
             }
             let mut want_bytes = [0u8; 32];
@@ -235,7 +244,11 @@ fn incremental_walk_matches_k256() {
 
             let (gpu_priv, gpu_addr) = gpu[bi][it as usize];
             assert_eq!(gpu_priv, want_bytes, "base {bi} it {it}: privkey mismatch");
-            assert_eq!(&gpu_addr[..], want_addr.as_bytes(), "base {bi} it {it}: address mismatch");
+            assert_eq!(
+                &gpu_addr[..],
+                want_addr.as_bytes(),
+                "base {bi} it {it}: address mismatch"
+            );
         }
     }
 
@@ -243,7 +256,10 @@ fn incremental_walk_matches_k256() {
     // n-2, n-1, 0 (degenerate), 1 -- assert the degenerate slot is exactly
     // it=2, proving the boundary was really exercised.
     let base = U256::from_big_endian(&bases[2]);
-    assert!(addmod(base, U256::from(2u32), n).is_zero(), "test setup: expected wrap at it=2");
+    assert!(
+        addmod(base, U256::from(2u32), n).is_zero(),
+        "test setup: expected wrap at it=2"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -374,7 +390,10 @@ fn mine_incremental_finds_and_verifies_low_threshold() {
     let hits = ctx.dispatch_mine_incremental(&seeds, &base, 4096, 2); // >=2 leading zero nibbles
     assert!(!hits.is_empty(), "should find >=2-zero addresses");
     for h in &hits {
-        assert!(ctx.verify_hit(h.privkey, h.address), "hit failed host re-derivation");
+        assert!(
+            ctx.verify_hit(h.privkey, h.address),
+            "hit failed host re-derivation"
+        );
         assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
     }
 }

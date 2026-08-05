@@ -2,6 +2,10 @@
 //! leading zero nibbles across CPU workers and the Metal GPU against one shared
 //! best-tracker, streaming strictly-increasing "new best" records in ERC-8117
 //! notation. Stops at `target_zeros` (default 8) or Ctrl-C.
+//!
+//! Salt-mining modes (`--create2`, `--create3`, `--createx`,
+//! `--create2-tagged`) mine a public salt/tag instead of an EOA key; see each
+//! mode's block below for its exact preimage.
 use std::env;
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
@@ -19,9 +23,12 @@ use nullforge::miner::cpu::cpu_worker;
 use nullforge::miner::gpu_driver::{run_batches, N_THREADS};
 use nullforge::miner::shared::MinerShared;
 
-/// CPU workers = round(num_cpus * UTILIZATION); ~20% of cores left for the
-/// system + the (I/O-bound) GPU driver thread.
-const UTILIZATION: f64 = 0.80;
+/// GPU is the PRIMARY engine; the CPU runs only a small SUPPORT pool. The GPU
+/// dwarfs the CPU (~0.19 vs multiple Mkeys/s) and every worker competes with the
+/// GPU driver thread for a core — leaving <2 cores free starves the GPU to ~0.
+/// So default to a tiny support count, freeing the rest of the chip for the GPU
+/// driver + OS. Integer-only, no float. Override with NULLFORGE_CPU_WORKERS.
+const CPU_SUPPORT_WORKERS: usize = 2;
 
 #[tokio::main]
 async fn main() {
@@ -31,14 +38,25 @@ async fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut reveal = false;
     let mut create2 = false;
+    let mut create3 = false;
+    let mut createx = false;
+    let mut create2tag = false;
     let mut deployer_arg: Option<String> = None;
     let mut ich_arg: Option<String> = None;
+    let mut factory_arg: Option<String> = None;
+    let mut proxyhash_arg: Option<String> = None;
+    let mut prefix_arg: Option<String> = None;
+    let mut owner_arg: Option<String> = None;
+    let mut permissions_arg: Option<String> = None;
     let mut target_arg: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--reveal" => reveal = true,
             "--create2" => create2 = true,
+            "--create3" => create3 = true,
+            "--createx" => createx = true,
+            "--create2-tagged" => create2tag = true,
             "--deployer" => {
                 i += 1;
                 deployer_arg = args.get(i).cloned();
@@ -47,9 +65,30 @@ async fn main() {
                 i += 1;
                 ich_arg = args.get(i).cloned();
             }
+            "--factory" => {
+                i += 1;
+                factory_arg = args.get(i).cloned();
+            }
+            // `--proxy-hash` is an accepted alias for `--proxy-init-code-hash`.
+            "--proxy-init-code-hash" | "--proxy-hash" => {
+                i += 1;
+                proxyhash_arg = args.get(i).cloned();
+            }
+            "--prefix" => {
+                i += 1;
+                prefix_arg = args.get(i).cloned();
+            }
+            "--owner" => {
+                i += 1;
+                owner_arg = args.get(i).cloned();
+            }
+            "--permissions" => {
+                i += 1;
+                permissions_arg = args.get(i).cloned();
+            }
             a if a.starts_with("--") => {
                 eprintln!(
-                    "unknown flag: {a}\nUsage: nullforge-gpu [target] [--reveal] [--create2 --deployer 0x.. --init-code-hash 0x..]"
+                    "unknown flag: {a}\nUsage: nullforge-gpu [target] [--reveal]\n  [--create2 --deployer 0x.. --init-code-hash 0x..]\n  [--create3 --factory 0x.. [--proxy-hash 0x..]]\n  [--createx]\n  [--create2-tagged --prefix <string> --deployer 0x.. --owner 0x.. --permissions 0x.. --factory 0x.. --init-code-hash 0x..]"
                 );
                 std::process::exit(2);
             }
@@ -109,6 +148,141 @@ async fn main() {
         return;
     }
 
+    // CREATE3 salt-mining mode: keccak-only (two keccaks/candidate). The mined
+    // address is bytecode-independent — it depends only on (factory, salt) — so
+    // the same salt lands on the same address on every chain with this factory.
+    // The output is a PUBLIC salt (no encryption).
+    if create3 {
+        let factory: [u8; 20] = parse_hex_arg(factory_arg, "--factory", 20)
+            .try_into()
+            .unwrap();
+        // The proxy init-code hash is FACTORY-SPECIFIC. Default to the
+        // Solmate/0xSequence CREATE3 proxy hash, but let the user override for
+        // Solady / CreateX / any custom factory. A wrong value can't mine
+        // garbage silently: `verify_create3` re-derives every hit host-side.
+        const DEFAULT_PROXY_INITCODE_HASH: &str =
+            "21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f";
+        let proxyhash: [u8; 32] = match proxyhash_arg {
+            Some(_) => parse_hex_arg(proxyhash_arg, "--proxy-init-code-hash", 32)
+                .try_into()
+                .unwrap(),
+            None => {
+                eprintln!(
+                    "NOTE: --proxy-init-code-hash not given; defaulting to the Solmate/0xSequence \
+                     CREATE3 proxy hash (0x{DEFAULT_PROXY_INITCODE_HASH}). Override this for \
+                     Solady/CreateX or any custom factory, or hits will be for the wrong address."
+                );
+                hex::decode(DEFAULT_PROXY_INITCODE_HASH)
+                    .expect("valid default proxy hash")
+                    .try_into()
+                    .unwrap()
+            }
+        };
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                println!("Received Ctrl+C. Stopping...");
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+        let ctx = MetalContext::new();
+        println!("nullforge-gpu --create3: mining a CREATE3 address with {target} leading zeros");
+        let handle = task::spawn_blocking(move || {
+            nullforge::miner::create3::run_create3(&ctx, &factory, &proxyhash, target, stop);
+        });
+        let _ = handle.await;
+        return;
+    }
+
+    // CreateX permissionless CREATE3 mode: deployer + proxy hash are the fixed
+    // canonical CreateX constants, so no --factory/--proxy-init-code-hash is
+    // needed. The mined salt is what you pass to CreateX.deployCreate3.
+    if createx {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                println!("Received Ctrl+C. Stopping...");
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+        let ctx = MetalContext::new();
+        println!(
+            "nullforge-gpu --createx: mining a CreateX (permissionless) CREATE3 address with \
+             {target} leading zeros"
+        );
+        let handle = task::spawn_blocking(move || {
+            nullforge::miner::createx::run_createx(&ctx, target, stop);
+        });
+        let _ = handle.await;
+        return;
+    }
+
+    // Tagged-CREATE2 salt-mining mode: keccak-only (three keccaks/candidate).
+    // Mines the caller-chosen "tag" input for factories that wrap it through a
+    // stable per-deployer salt before CREATE2 (e.g. mev-arbitrum's
+    // `MevSafeFactory.saltFor`), rather than a raw CREATE2 salt directly. The
+    // output is a PUBLIC tag (no encryption).
+    if create2tag {
+        let prefix = prefix_arg.unwrap_or_else(|| {
+            eprintln!("ERROR: --prefix <string> is required with --create2-tagged");
+            std::process::exit(2);
+        });
+        let deployer: [u8; 20] = parse_hex_arg(deployer_arg, "--deployer", 20)
+            .try_into()
+            .unwrap();
+        let owner: [u8; 20] = parse_hex_arg(owner_arg, "--owner", 20).try_into().unwrap();
+        let permissions: [u8; 20] = parse_hex_arg(permissions_arg, "--permissions", 20)
+            .try_into()
+            .unwrap();
+        let factory: [u8; 20] = parse_hex_arg(factory_arg, "--factory", 20)
+            .try_into()
+            .unwrap();
+        let ich: [u8; 32] = parse_hex_arg(ich_arg, "--init-code-hash", 32)
+            .try_into()
+            .unwrap();
+        if prefix.len() > 32 {
+            eprintln!(
+                "ERROR: --prefix must be <= 32 bytes (got {} bytes: {prefix:?})",
+                prefix.len()
+            );
+            std::process::exit(2);
+        }
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                println!("Received Ctrl+C. Stopping...");
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+        let ctx = MetalContext::new();
+        println!(
+            "nullforge-gpu --create2-tagged: mining a tagged-CREATE2 address with {target} leading zeros"
+        );
+        let handle = task::spawn_blocking(move || {
+            nullforge::miner::create2tag::run_create2tag(
+                &ctx,
+                prefix.as_bytes(),
+                &deployer,
+                &owner,
+                &permissions,
+                &factory,
+                &ich,
+                target,
+                stop,
+            );
+        });
+        let _ = handle.await;
+        return;
+    }
+
     // Resolve how found keys are written. Fail closed if no age recipient is
     // configured and --reveal was not passed.
     let key_sink = match nullforge::keyenc::resolve_sink(reveal) {
@@ -128,7 +302,12 @@ async fn main() {
         );
     }
 
-    let cpu_workers = ((num_cpus::get() as f64) * UTILIZATION).round().max(1.0) as usize;
+    let cores = num_cpus::get();
+    let cpu_workers = std::env::var("NULLFORGE_CPU_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(CPU_SUPPORT_WORKERS)
+        .clamp(1, cores);
     println!(
         "nullforge-gpu: {cpu_workers} CPU workers + GPU, finding an address with {target} leading zeros"
     );
@@ -268,8 +447,8 @@ mod tests {
         assert_eq!(
             bytes,
             vec![
-                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
-                0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+                0x0f, 0x10, 0x11, 0x12, 0x13, 0x14
             ]
         );
     }

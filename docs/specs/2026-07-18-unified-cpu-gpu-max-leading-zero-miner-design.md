@@ -24,10 +24,10 @@ goal is leading zeros. The pure-CPU `nullforge` keeps its existing behavior.
 
 ## Measured baseline (Apple M1 Pro — 10 CPU cores, 16-core GPU, release build)
 
-| Engine | Rate | How measured |
-|---|---|---|
-| CPU, all 10 cores | ~180,000 keys/s | `nullforge 99` printed rate |
-| GPU, current kernel | ~90,000 keys/s | timing `derive_address_gpu` |
+| Engine              | Rate            | How measured                |
+| ------------------- | --------------- | --------------------------- |
+| CPU, all 10 cores   | ~180,000 keys/s | `nullforge 99` printed rate |
+| GPU, current kernel | ~90,000 keys/s  | timing `derive_address_gpu` |
 
 Two findings drive this design:
 
@@ -59,6 +59,7 @@ runtime. The pure-CPU `nullforge` (`src/main.rs`) stays as-is for
 GPU-less / quick runs.
 
 Threads:
+
 - **CPU workers ×`round(num_cpus * 0.80)`** — the existing random-key loop,
   reporting through the shared funnel. ~80% of cores; ~20% left for the system.
 - **GPU driver ×1** — owns `MetalContext`; loops dispatch → verify → report.
@@ -122,12 +123,13 @@ measuring): `N_THREADS = 65536`, `ITERS = 256` (~16.7M candidates/batch),
 `GPU_FLOOR = 4`.
 
 **GPU driver** (per batch):
+
 - One-time: `N_THREADS` full-entropy seeds; global `base` counter.
 - Batch: `threshold = max(GPU_FLOOR, best_zeros)`;
   `hits = dispatch_mine(seeds, [base;N], ITERS, threshold)`; `base += ITERS`;
   `gpu_keys += N*ITERS`.
 - Each hit: **verify vs k256** → mismatch ⇒ `Err` ⇒ hard-abort `exit(1)`.
-  Recompute zeros from the *verified* address (authoritative), render
+  Recompute zeros from the _verified_ address (authoritative), render
   `address_str`, `report_hit(Gpu, …)`.
 - Throttle `0.25·T`; check `stop` between batches.
 - `GPU_FLOOR = 4` keeps a full batch under the kernel's 1024-hit cap
@@ -136,6 +138,7 @@ measuring): `N_THREADS = 65536`, `ITERS = 256` (~16.7M candidates/batch),
   `target_zeros`.
 
 **`report_hit`** (the funnel):
+
 1. `if zeros <= best_zeros { return }` — no lock. Strictly-greater gating gives
    the CPU-style "each new best beats the last" and prevents the two engines
    double-reporting the same level.
@@ -207,8 +210,9 @@ the `mine` kernel, so implementation must first base on (or land) that WIP.
 
 **Staging** (each a verified step; throughput climbs without ever risking a bad
 key):
+
 1. **Integration** — unified process + progressive strictly-increasing best
-   reporting (ERC-8117) on the *current* kernel. Immediate value.
+   reporting (ERC-8117) on the _current_ kernel. Immediate value.
 2. **Comb table** for `k·G` — verified identical to `k256`.
 3. **Per-thread batched inverse** — verified identical to `k256`.
 

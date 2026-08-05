@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::task;
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 /// Iterations each worker accumulates before flushing to the shared
 /// generated-counter atomic (reduces cross-thread cache-line contention).
@@ -196,7 +196,11 @@ async fn main() {
                 }
 
                 let wallet = Wallet::new_with_signer(signer, address, 1);
-                let mut sk_bytes: [u8; 32] = wallet.signer().to_bytes().into();
+                // Wrapped in `Zeroizing` so the plaintext key bytes are wiped on
+                // Drop -- including while unwinding, which the writeln!().expect()
+                // below can trigger (a manual zeroize at the end would be skipped).
+                let sk_bytes: Zeroizing<[u8; 32]> =
+                    Zeroizing::new(wallet.signer().to_bytes().into());
 
                 // Flush the local counter before the (rare) report so the logged and
                 // printed running total is current.
@@ -232,7 +236,6 @@ async fn main() {
                         }
                     }
                 }
-                sk_bytes.zeroize();
 
                 {
                     let mut best_wallet_lock = best_wallet.lock().unwrap();
