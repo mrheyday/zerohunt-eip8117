@@ -197,4 +197,20 @@ mod tests {
             privkey.to_vec()
         );
     }
+
+    #[test]
+    fn decrypt_key_field_tolerates_surrounding_whitespace() {
+        // `decrypt_key_field` trims the field before base64-decoding, since it
+        // reads tab-separated columns from a text file that may pick up stray
+        // whitespace/newlines.
+        let identity = age::x25519::Identity::generate();
+        let sink = KeySink::Encrypt(identity.to_public());
+        let privkey: [u8; 32] = [0x7A; 32];
+
+        let field = encode_key_field(&sink, &privkey).unwrap();
+        let padded = format!("  \t{field}\n\t ");
+
+        let recovered = decrypt_key_field(&identity, &padded).unwrap();
+        assert_eq!(recovered, privkey.to_vec());
+    }
 }

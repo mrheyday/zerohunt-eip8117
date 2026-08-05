@@ -105,4 +105,12 @@ mod tests {
         // e.g. `nullforge-gpu 2`: we must still surface >=2 hits
         assert_eq!(gpu_threshold(0, 2), 2);
     }
+
+    #[test]
+    fn threshold_at_target_exactly_equal_to_floor_stays_at_floor() {
+        // Boundary: `target < GPU_FLOOR` clamps down, but `target == GPU_FLOOR`
+        // must NOT clamp (the `<` comparison is strict) -- the floor itself is
+        // still a valid, un-clamped threshold.
+        assert_eq!(gpu_threshold(0, GPU_FLOOR), GPU_FLOOR as u32);
+    }
 }

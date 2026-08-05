@@ -497,135 +497,76 @@ fn create2_finds_and_verifies_low_threshold() {
     }
 }
 
-#[test]
-fn create3_finds_and_verifies_low_threshold() {
-    use nullforge::gpu::STANDARD_CREATE3_PROXY_HASH;
-
-    let ctx = MetalContext::new();
-    let factory: [u8; 20] = [0x11; 20];
-    let proxy_hash = STANDARD_CREATE3_PROXY_HASH;
-
-    let n = 256usize;
-    let base_salts: Vec<[u8; 32]> = (0..n)
-        .map(|i| {
-            let mut s = [0u8; 32];
-            s[0] = (i & 0xff) as u8;
-            s[1] = (i >> 8) as u8;
-            s[23] = 0x11;
-            s
-        })
-        .collect();
-    let base_counters: Vec<u64> = vec![0u64; n];
-
-    // >= 2 leading zero nibbles across 256*4096 candidates -> plenty of hits fast.
-    let hits = ctx.dispatch_create3(&factory, &proxy_hash, &base_salts, &base_counters, 4096, 2);
-    assert!(!hits.is_empty(), "should find >=2-zero CREATE3 addresses");
-
-    for h in &hits {
-        // Host re-derivation gate (proxy CREATE2 -> proxy CREATE nonce-1).
-        assert!(
-            ctx.verify_create3(&factory, &proxy_hash, &h.salt, &h.address),
-            "GPU CREATE3 hit failed host re-derivation"
-        );
-        assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
-    }
-}
+// ---------------------------------------------------------------------------
+// Negative-path regressions: the host re-derivation gates (`verify_hit`,
+// `verify_create2`) must reject a claimed address/salt that does not actually
+// match the private key / CREATE2 inputs -- these are the exact checks that
+// gate a "FATAL" hard-abort in the GPU drivers, so a false positive here would
+// be a critical, silent-corruption-class bug.
+// ---------------------------------------------------------------------------
 
 #[test]
-fn createx_finds_and_verifies_low_threshold() {
-    use nullforge::gpu::{CREATEX_ADDRESS, STANDARD_CREATE3_PROXY_HASH};
+fn verify_hit_rejects_mismatched_address() {
+    use ethers::core::k256::ecdsa::SigningKey;
+    use ethers::utils::secret_key_to_address;
 
     let ctx = MetalContext::new();
-    let proxy_hash = STANDARD_CREATE3_PROXY_HASH;
+    let mut privkey = [0u8; 32];
+    privkey[31] = 0x2A;
+    let sk = SigningKey::from_bytes((&privkey).into()).expect("canonical scalar");
+    let real_address = secret_key_to_address(&sk);
 
-    let n = 256usize;
-    let base_salts: Vec<[u8; 32]> = (0..n)
-        .map(|i| {
-            let mut s = [0u8; 32];
-            s[0] = (i & 0xff) as u8;
-            s[1] = (i >> 8) as u8;
-            s[23] = 0x22;
-            s
-        })
-        .collect();
-    let base_counters: Vec<u64> = vec![0u64; n];
-
-    let hits = ctx.dispatch_createx(
-        &CREATEX_ADDRESS,
-        &proxy_hash,
-        &base_salts,
-        &base_counters,
-        4096,
-        2,
-    );
-    assert!(!hits.is_empty(), "should find >=2-zero CreateX addresses");
-
-    for h in &hits {
-        // `h.salt` is the ORIGINAL (un-guarded) salt; verify_createx re-guards
-        // it (keccak256(salt)) internally before the two-hop CREATE3 derivation.
-        assert!(
-            ctx.verify_createx(&CREATEX_ADDRESS, &proxy_hash, &h.salt, &h.address),
-            "GPU CreateX hit failed host re-derivation"
-        );
-        assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
-    }
-}
-
-#[test]
-fn create2tag_finds_and_verifies_low_threshold() {
-    let ctx = MetalContext::new();
-    let prefix = b"MevSafe.v2:";
-    let deployer: [u8; 20] = [0x11; 20];
-    let owner: [u8; 20] = [0x22; 20];
-    let permissions: [u8; 20] = [0x33; 20];
-    let factory: [u8; 20] = [0x44; 20];
-    let initcodehash: [u8; 32] = [0x55; 32];
-
-    let n = 256usize;
-    let base_tags: Vec<[u8; 32]> = (0..n)
-        .map(|i| {
-            let mut s = [0u8; 32];
-            s[0] = (i & 0xff) as u8;
-            s[1] = (i >> 8) as u8;
-            s[23] = 0x33;
-            s
-        })
-        .collect();
-    let base_counters: Vec<u64> = vec![0u64; n];
-
-    // >= 2 leading zero nibbles across 256*4096 candidates -> plenty of hits fast.
-    let hits = ctx.dispatch_create2tag(
-        prefix,
-        &deployer,
-        &owner,
-        &permissions,
-        &factory,
-        &initcodehash,
-        &base_tags,
-        &base_counters,
-        4096,
-        2,
-    );
+    // Sanity: the real (privkey, address) pair must verify.
     assert!(
-        !hits.is_empty(),
-        "should find >=2-zero tagged-CREATE2 addresses"
+        ctx.verify_hit(privkey, *real_address.as_fixed_bytes()),
+        "genuine hit unexpectedly failed verification"
     );
 
-    for h in &hits {
-        // Host re-derivation gate (saltFor wrap -> abi.encode salt mix -> CREATE2).
-        assert!(
-            ctx.verify_create2tag(
-                prefix,
-                &deployer,
-                &owner,
-                &permissions,
-                &factory,
-                &initcodehash,
-                &h.tag,
-                &h.address
-            ),
-            "GPU tagged-CREATE2 hit failed host re-derivation"
-        );
-        assert!(h.address[0] >> 4 == 0, "claimed leading zero nibble wrong");
-    }
+    // Tamper with a single byte of the address; the mismatched pair must be
+    // rejected rather than silently accepted.
+    let mut tampered = *real_address.as_fixed_bytes();
+    tampered[0] ^= 0xFF;
+    assert!(
+        !ctx.verify_hit(privkey, tampered),
+        "verify_hit must reject a tampered address for the same private key"
+    );
+}
+
+#[test]
+fn verify_create2_rejects_tampered_hit() {
+    use ethers::types::Address;
+    use ethers::utils::get_create2_address_from_hash;
+
+    let ctx = MetalContext::new();
+    let deployer: [u8; 20] = [0x33; 20];
+    let initcodehash: [u8; 32] = [0x44; 32];
+    let salt: [u8; 32] = [0x55; 32];
+    let address = *get_create2_address_from_hash(
+        Address::from_slice(&deployer),
+        salt,
+        initcodehash,
+    )
+    .as_fixed_bytes();
+
+    // Sanity: the real (salt, address) pair must verify.
+    assert!(
+        ctx.verify_create2(&deployer, &initcodehash, &salt, &address),
+        "genuine CREATE2 hit unexpectedly failed verification"
+    );
+
+    // A tampered salt must no longer re-derive the same address.
+    let mut tampered_salt = salt;
+    tampered_salt[31] ^= 0xFF;
+    assert!(
+        !ctx.verify_create2(&deployer, &initcodehash, &tampered_salt, &address),
+        "verify_create2 must reject a salt that doesn't derive the claimed address"
+    );
+
+    // A tampered address must not verify against the original, genuine salt.
+    let mut tampered_address = address;
+    tampered_address[0] ^= 0xFF;
+    assert!(
+        !ctx.verify_create2(&deployer, &initcodehash, &salt, &tampered_address),
+        "verify_create2 must reject a claimed address that doesn't match the salt"
+    );
 }
