@@ -22,17 +22,28 @@ pub struct MetalContext {
     /// CreateX salt guard, then the CREATE3 proxy + final). Compiled once,
     /// reused by every `dispatch_createx` batch.
     createx_pipeline: ComputePipelineState,
+    /// The `mine_create2tag` pipeline (keccak-only, three keccaks/candidate:
+    /// `saltFor`-style tag wrap, `abi.encode` salt mix, then CREATE2).
+    /// Compiled once, reused by every `dispatch_create2tag` batch.
+    create2tag_pipeline: ComputePipelineState,
 }
 
 /// CreateX (pcaversaccio) canonical cross-chain address — the CREATE2 deployer
-/// of the CREATE3 proxy, identical on every supported chain.
+/// of the CREATE3 proxy, identical on every chain that ran the Nick's-method
+/// pre-signed deploy. Source of truth:
+/// <https://github.com/pcaversaccio/createx> README pin
+/// `0xba5Ed099633D3B313e4D5F7bdc1305d3c28ba5Ed`. Override at runtime with
+/// `CREATEX_FACTORY` / `CREATEX_ADDRESS` (see `miner::createx`).
 pub const CREATEX_ADDRESS: [u8; 20] = [
-    0xba, 0x5E, 0xd0, 0x99, 0x63, 0x3D, 0x3B, 0x31, 0x3e, 0x4D, 0x5F, 0x7b, 0xdc, 0x13, 0x05, 0xd3,
-    0xc2, 0x8b, 0xa5, 0xEd,
+    0xba, 0x5e, 0xd0, 0x99, 0x63, 0x3d, 0x3b, 0x31, 0x3e, 0x4d, 0x5f, 0x7b, 0xdc, 0x13, 0x05, 0xd3,
+    0xc2, 0x8b, 0xa5, 0xed,
 ];
 
-/// Standard CREATE3 proxy init-code hash (Solmate/0xSequence/CreateX all share
-/// the same 16-byte proxy `0x67363d3d37363d34f03d5260086018f3`).
+/// Standard CREATE3 proxy init-code hash.
+/// CreateX `proxyChildBytecode` = `hex"67_36_3d_3d_37_36_3d_34_f0_3d_52_60_08_60_18_f3"`
+/// (<https://github.com/pcaversaccio/createx> `src/CreateX.sol`); Solmate /
+/// 0xSequence share the same 16-byte proxy. `keccak256` of that bytecode:
+/// `0x21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f`.
 pub const STANDARD_CREATE3_PROXY_HASH: [u8; 32] = [
     0x21, 0xc3, 0x5d, 0xbe, 0x1b, 0x34, 0x4a, 0x24, 0x88, 0xcf, 0x33, 0x21, 0xd6, 0xce, 0x54, 0x2f,
     0x8e, 0x9f, 0x30, 0x55, 0x44, 0xff, 0x09, 0xe4, 0x99, 0x3a, 0x62, 0x31, 0x9a, 0x49, 0x7c, 0x1f,
@@ -71,6 +82,19 @@ pub struct Create3Hit {
     pub zeros: u8,
 }
 
+/// A tagged-CREATE2 vanity hit: a `tag` whose three-stage derivation
+/// (`saltFor`-style tag wrap → `abi.encode` salt mix → CREATE2) yields an
+/// address with `zeros` leading zero nibbles. `tag` is what a caller passes
+/// into the factory's own `saltFor`/salt-tag input — no on-chain derivation
+/// changes. Callers MUST re-verify via `MetalContext::verify_create2tag`
+/// before trusting `address`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Create2TagHit {
+    pub tag: [u8; 32],
+    pub address: [u8; 20],
+    pub zeros: u8,
+}
+
 /// Must match `HIT_STRIDE` in `kernels/miner.metal`.
 const MINE_HIT_STRIDE: usize = 64;
 /// Must match `MAX_HITS` in `kernels/miner.metal`.
@@ -84,6 +108,7 @@ impl MetalContext {
         let create2_pipeline = Self::build_create2_pipeline(&device);
         let create3_pipeline = Self::build_create3_pipeline(&device);
         let createx_pipeline = Self::build_createx_pipeline(&device);
+        let create2tag_pipeline = Self::build_create2tag_pipeline(&device);
         Self {
             device,
             queue,
@@ -91,7 +116,26 @@ impl MetalContext {
             create2_pipeline,
             create3_pipeline,
             createx_pipeline,
+            create2tag_pipeline,
         }
+    }
+
+    /// Compile the tagged-CREATE2 MSL (keccak + create2tag, three
+    /// keccaks/candidate) and build the `mine_create2tag` pipeline. Called
+    /// once from `new()`, reused by every `dispatch_create2tag` call.
+    fn build_create2tag_pipeline(device: &Device) -> ComputePipelineState {
+        let keccak_src = include_str!("../../kernels/keccak.metal");
+        let create2tag_src = include_str!("../../kernels/create2tag.metal");
+        let src = format!("{keccak_src}\n{create2tag_src}");
+        let lib = device
+            .new_library_with_source(&src, &CompileOptions::new())
+            .expect("create2tag kernel compile failed");
+        let func = lib
+            .get_function("mine_create2tag", None)
+            .expect("mine_create2tag entry not found");
+        device
+            .new_compute_pipeline_state_with_function(&func)
+            .expect("create2tag pipeline")
     }
 
     /// Compile the CreateX MSL (keccak + createx) and build the `mine_createx`
@@ -460,11 +504,13 @@ impl MetalContext {
                     .map(|it| {
                         let mut pk = [0u8; 32];
                         pk.copy_from_slice(
-                            &priv_bytes[(i * iters as usize + it) * 32..(i * iters as usize + it) * 32 + 32],
+                            &priv_bytes[(i * iters as usize + it) * 32
+                                ..(i * iters as usize + it) * 32 + 32],
                         );
                         let mut addr = [0u8; 20];
                         addr.copy_from_slice(
-                            &addr_bytes[(i * iters as usize + it) * 20..(i * iters as usize + it) * 20 + 20],
+                            &addr_bytes[(i * iters as usize + it) * 20
+                                ..(i * iters as usize + it) * 20 + 20],
                         );
                         (pk, addr)
                     })
@@ -1236,6 +1282,212 @@ impl MetalContext {
         rlp.extend_from_slice(&proxy[12..32]);
         rlp.push(0x01);
         &keccak256(&rlp)[12..32] == address
+    }
+
+    /// Dispatch one tagged-CREATE2 keccak-only batch: `mine_create2tag` scans
+    /// `iters` tags per thread for fixed `prefix`/`deployer`/`owner`/
+    /// `permissions`/`factory`/`initcodehash`, reporting tags whose derived
+    /// address has `>= threshold` leading-zero nibbles (bounded to 1024
+    /// hits/call). `prefix` must be <= 32 bytes (the kernel's
+    /// `C2T_MAX_PREFIX`). Each thread's tag is `base_tags[gid]` with its low
+    /// 8 bytes replaced by `base_counters[gid] + it`. Every hit MUST be
+    /// re-verified via `verify_create2tag` before it is trusted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_create2tag(
+        &self,
+        prefix: &[u8],
+        deployer: &[u8; 20],
+        owner: &[u8; 20],
+        permissions: &[u8; 20],
+        factory: &[u8; 20],
+        initcodehash: &[u8; 32],
+        base_tags: &[[u8; 32]],
+        base_counters: &[u64],
+        iters: u32,
+        threshold: u32,
+    ) -> Vec<Create2TagHit> {
+        assert!(
+            prefix.len() <= 32,
+            "prefix must be <= 32 bytes (kernel C2T_MAX_PREFIX)"
+        );
+        assert_eq!(
+            base_tags.len(),
+            base_counters.len(),
+            "base_tags/base_counters length mismatch"
+        );
+        let n = base_tags.len();
+
+        let mut prefix_buf_bytes = [0u8; 32];
+        prefix_buf_bytes[..prefix.len()].copy_from_slice(prefix);
+        let prefix_len = prefix.len() as u32;
+
+        let mut tag_bytes = vec![0u8; n * 32];
+        for (i, s) in base_tags.iter().enumerate() {
+            tag_bytes[i * 32..i * 32 + 32].copy_from_slice(s);
+        }
+
+        let prefix_buf = self.device.new_buffer_with_data(
+            prefix_buf_bytes.as_ptr() as *const std::ffi::c_void,
+            32,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let prefix_len_buf = self.device.new_buffer_with_data(
+            &prefix_len as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let deployer_buf = self.device.new_buffer_with_data(
+            deployer.as_ptr() as *const std::ffi::c_void,
+            20,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let owner_buf = self.device.new_buffer_with_data(
+            owner.as_ptr() as *const std::ffi::c_void,
+            20,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let permissions_buf = self.device.new_buffer_with_data(
+            permissions.as_ptr() as *const std::ffi::c_void,
+            20,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let factory_buf = self.device.new_buffer_with_data(
+            factory.as_ptr() as *const std::ffi::c_void,
+            20,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let ich_buf = self.device.new_buffer_with_data(
+            initcodehash.as_ptr() as *const std::ffi::c_void,
+            32,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let tags_buf = self.device.new_buffer_with_data(
+            tag_bytes.as_ptr() as *const std::ffi::c_void,
+            tag_bytes.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let counters_buf = self.device.new_buffer_with_data(
+            base_counters.as_ptr() as *const std::ffi::c_void,
+            std::mem::size_of_val(base_counters) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let iters_buf = self.device.new_buffer_with_data(
+            &iters as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let threshold_buf = self.device.new_buffer_with_data(
+            &threshold as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let hit_count_buf = self.device.new_buffer(
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        unsafe {
+            std::ptr::write_bytes(
+                hit_count_buf.contents() as *mut u8,
+                0,
+                std::mem::size_of::<u32>(),
+            );
+        }
+        let hits_bytes = MINE_MAX_HITS * MINE_HIT_STRIDE;
+        let hits_buf = self
+            .device
+            .new_buffer(hits_bytes as u64, MTLResourceOptions::StorageModeShared);
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&self.create2tag_pipeline);
+        enc.set_buffer(0, Some(&prefix_buf), 0);
+        enc.set_buffer(1, Some(&prefix_len_buf), 0);
+        enc.set_buffer(2, Some(&deployer_buf), 0);
+        enc.set_buffer(3, Some(&owner_buf), 0);
+        enc.set_buffer(4, Some(&permissions_buf), 0);
+        enc.set_buffer(5, Some(&factory_buf), 0);
+        enc.set_buffer(6, Some(&ich_buf), 0);
+        enc.set_buffer(7, Some(&tags_buf), 0);
+        enc.set_buffer(8, Some(&counters_buf), 0);
+        enc.set_buffer(9, Some(&iters_buf), 0);
+        enc.set_buffer(10, Some(&threshold_buf), 0);
+        enc.set_buffer(11, Some(&hit_count_buf), 0);
+        enc.set_buffer(12, Some(&hits_buf), 0);
+        let tg = self
+            .create2tag_pipeline
+            .max_total_threads_per_threadgroup()
+            .min(n as u64)
+            .max(1);
+        enc.dispatch_threads(MTLSize::new(n as u64, 1, 1), MTLSize::new(tg, 1, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let found = unsafe { *(hit_count_buf.contents() as *const u32) } as usize;
+        let count = found.min(MINE_MAX_HITS);
+        let ptr = hits_buf.contents() as *const u8;
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, hits_bytes) };
+
+        (0..count)
+            .map(|i| {
+                let rec = i * MINE_HIT_STRIDE;
+                let mut tag = [0u8; 32];
+                tag.copy_from_slice(&bytes[rec..rec + 32]);
+                let mut address = [0u8; 20];
+                address.copy_from_slice(&bytes[rec + 32..rec + 52]);
+                let zeros = bytes[rec + 52];
+                Create2TagHit {
+                    tag,
+                    address,
+                    zeros,
+                }
+            })
+            .collect()
+    }
+
+    /// Host-side re-derivation gate for a tagged-CREATE2 hit:
+    ///   userSalt      = keccak256(prefix ‖ deployer ‖ tag)                  (packed)
+    ///   effectiveSalt = keccak256(abi.encode(owner, permissions, userSalt, deployer))
+    ///   addr          = keccak256(0xff ‖ factory ‖ effectiveSalt ‖ initCodeHash)[12:]
+    /// Returns `false` on any mismatch (a GPU bug must never emit a bad tag).
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_create2tag(
+        &self,
+        prefix: &[u8],
+        deployer: &[u8; 20],
+        owner: &[u8; 20],
+        permissions: &[u8; 20],
+        factory: &[u8; 20],
+        initcodehash: &[u8; 32],
+        tag: &[u8; 32],
+        address: &[u8; 20],
+    ) -> bool {
+        use ethers::utils::keccak256;
+
+        let mut pre1 = Vec::with_capacity(prefix.len() + 20 + 32);
+        pre1.extend_from_slice(prefix);
+        pre1.extend_from_slice(deployer);
+        pre1.extend_from_slice(tag);
+        let user_salt = keccak256(&pre1);
+
+        fn pad_address(a: &[u8; 20]) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            out[12..32].copy_from_slice(a);
+            out
+        }
+        let mut pre2 = Vec::with_capacity(128);
+        pre2.extend_from_slice(&pad_address(owner));
+        pre2.extend_from_slice(&pad_address(permissions));
+        pre2.extend_from_slice(&user_salt);
+        pre2.extend_from_slice(&pad_address(deployer));
+        let effective_salt = keccak256(&pre2);
+
+        let mut pre3 = Vec::with_capacity(85);
+        pre3.push(0xff);
+        pre3.extend_from_slice(factory);
+        pre3.extend_from_slice(&effective_salt);
+        pre3.extend_from_slice(initcodehash);
+        &keccak256(&pre3)[12..32] == address
     }
 
     /// Compile `src`, bind `inputs`/`lens`/an output buffer, dispatch the

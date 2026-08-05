@@ -90,4 +90,13 @@ mod tests {
         let note = feasibility_note(12).unwrap();
         assert!(note.contains("12"), "got: {note}");
     }
+
+    #[test]
+    fn feasibility_note_message_scales_with_n_for_max_target() {
+        // At the maximum supported target (40), the note must reference the
+        // correct 16^n odds rather than a stale/hardcoded value.
+        let note = feasibility_note(MAX_LEADING_ZERO_NIBBLES).unwrap();
+        assert!(note.contains("16^40"), "got: {note}");
+        assert!(note.contains("40 leading zeros"), "got: {note}");
+    }
 }

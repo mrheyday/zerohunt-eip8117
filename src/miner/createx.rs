@@ -1,9 +1,21 @@
-//! CreateX permissionless CREATE3 salt-mining driver. Mirrors `create3`, but
-//! the deployer is the canonical CreateX contract, the salt is guarded
-//! (`guardedSalt = keccak256(salt)`) inside the kernel, and the emitted value
-//! is the ORIGINAL salt you pass to `CreateX.deployCreate3(salt, initCode)`.
-//! The resulting address is bytecode-independent and identical on every chain
-//! with CreateX deployed. Salt is public → plaintext `scanned_salts.txt`.
+//! CreateX permissionless CREATE3 salt-mining driver.
+//!
+//! Algorithm locked to upstream CreateX:
+//! <https://github.com/pcaversaccio/createx> (`src/CreateX.sol`).
+//!
+//! Mirrors `create3`, but the deployer is a CreateX factory, the salt is
+//! guarded (`guardedSalt = keccak256(salt)` for the permissionless
+//! `SenderBytes.Random` branch — see `CreateX._guard`) inside the kernel, and
+//! the emitted value is the ORIGINAL salt you pass to
+//! `CreateX.deployCreate3(salt, initCode)`.
+//!
+//! Default factory = Nick's-method canonical
+//! `0xba5Ed099633D3B313e4D5F7bdc1305d3c28ba5Ed` (identical on every chain that
+//! ran the pre-signed deploy). Override with `CREATEX_FACTORY` or
+//! `CREATEX_ADDRESS` (20-byte hex) for a project-local CreateX redeploy — the
+//! CREATE3 math is the same; only the factory identity changes.
+//!
+//! Salt is public → plaintext `scanned_salts.txt`.
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -24,19 +36,53 @@ pub const CX_ITERS: u32 = 256;
 const CX_GPU_FLOOR: usize = 4;
 const UTILIZATION: f64 = 0.80;
 
+/// Upstream CreateX repository (algorithm + proxyChildBytecode source of truth).
+pub const CREATEX_UPSTREAM: &str = "https://github.com/pcaversaccio/createx";
+
 fn cx_threshold(best_zeros: usize, target: usize) -> u32 {
     let t = best_zeros.max(CX_GPU_FLOOR);
     let t = if target < CX_GPU_FLOOR { target } else { t };
     t as u32
 }
 
+/// Resolve factory: `CREATEX_FACTORY` → `CREATEX_ADDRESS` → canonical constant.
+fn resolve_createx_factory() -> [u8; 20] {
+    let raw = std::env::var("CREATEX_FACTORY")
+        .or_else(|_| std::env::var("CREATEX_ADDRESS"))
+        .ok();
+    match raw {
+        Some(s) => {
+            let hexstr = s.trim().trim_start_matches("0x");
+            assert_eq!(
+                hexstr.len(),
+                40,
+                "CREATEX_FACTORY/CREATEX_ADDRESS must be 20 bytes hex"
+            );
+            let mut out = [0u8; 20];
+            for i in 0..20 {
+                out[i] = u8::from_str_radix(&hexstr[i * 2..i * 2 + 2], 16)
+                    .expect("CREATEX_FACTORY/CREATEX_ADDRESS hex");
+            }
+            eprintln!(
+                "nullforge createx: factory override 0x{} (upstream {})",
+                hex::encode(out),
+                CREATEX_UPSTREAM
+            );
+            out
+        }
+        None => CREATEX_ADDRESS,
+    }
+}
+
 /// Mine CreateX permissionless CREATE3 salts until `stop` is set or a salt
-/// yielding `target` leading-zero nibbles is found. Deployer + proxy hash are
-/// the fixed CreateX constants. Verifies every GPU hit against the host guard +
-/// two-step keccak (mismatch hard-aborts); appends each new best to
-/// `scanned_salts.txt` as `<total>\t<address(erc8117)>\t<zeros>\t<salt_hex>`.
+/// yielding `target` leading-zero nibbles is found. Proxy hash is the fixed
+/// CreateX `proxyChildBytecode` hash (Solmate/0xSequence-compatible). Factory
+/// defaults to the canonical address; override via env. Verifies every GPU hit
+/// against the host guard + two-step keccak (mismatch hard-aborts); appends
+/// each new best to `scanned_salts.txt` as
+/// `<total>\t<address(erc8117)>\t<zeros>\t<salt_hex>`.
 pub fn run_createx(ctx: &MetalContext, target: usize, stop: Arc<AtomicBool>) {
-    let createx = CREATEX_ADDRESS;
+    let createx = resolve_createx_factory();
     let proxyhash = STANDARD_CREATE3_PROXY_HASH;
 
     let mut rng = StdRng::from_entropy();

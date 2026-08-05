@@ -167,7 +167,7 @@ leading zeros (e.g. `0x0000bbbb…`) as a secondary "interestingness" signal.
 
 ### CREATE2 contract addresses (gas-optimized deploys)
 
-For a **contract** whose *deployed address* has leading zeros — to save calldata
+For a **contract** whose _deployed address_ has leading zeros — to save calldata
 gas, worth it for a contract referenced in nearly every tx — you mine a
 **CREATE2 salt**, not an EOA key. This mode is **keccak-only** (no secp256k1), so
 it's far faster than the EOA miner, and the result is a **public salt**: nothing
@@ -192,7 +192,7 @@ reference. 12 nibbles (6 bytes) ≈ 2⁴⁸ salts — roughly a day on one moder
 
 CREATE3 deploys a **constant proxy** via CREATE2, and the proxy does a nonce-1
 CREATE of your contract. Because the proxy init code is fixed, the final address
-depends only on **(factory, salt)** — *not* on your contract's bytecode or
+depends only on **(factory, salt)** — _not_ on your contract's bytecode or
 constructor args. So a mined salt yields the **same vanity address on every
 chain** that has the same factory (ideal for a deterministic executor
 address). This mode is also **keccak-only** (two keccaks per candidate, ~half
@@ -214,7 +214,7 @@ CREATE). New bests append to `scanned_salts.txt`, same format as CREATE2.
 > (`0x21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f`), but
 > **Solady** and **CreateX** differ, and **CreateX additionally guards the salt**
 > (mixing in `msg.sender` / a redeploy flag), which changes the salt→address
-> map entirely. Pass the hash for *your* factory. Every hit is re-derived
+> map entirely. Pass the hash for _your_ factory. Every hit is re-derived
 > host-side (`verify_create3`), so a wrong hash fails loudly rather than mining
 > for the wrong address.
 
@@ -222,15 +222,15 @@ CREATE). New bests append to `scanned_salts.txt`, same format as CREATE2.
 
 ## CLI reference
 
-| Command | What it does |
-|---|---|
-| `nullforge [N] [--reveal]` | CPU miner. `N` = target leading-zero nibbles (default `8`, valid `1–40`). |
-| `nullforge-gpu [N] [--reveal]` | Unified CPU + GPU miner (Apple Metal). Same args. |
-| `nullforge-gpu [N] --create2 --deployer 0x.. --init-code-hash 0x..` | Mine a CREATE2 **salt** so a *contract* deploys to an N-leading-zero address (keccak-only; salt is public → plaintext `scanned_salts.txt`). |
-| `nullforge-gpu [N] --create3 --factory 0x.. [--proxy-hash 0x..]` | Mine a CREATE3 **salt** so a *contract* deploys to an N-leading-zero, **bytecode-independent** address (same on every chain with that factory). Proxy hash defaults to Solmate/0xSequence; override (`--proxy-hash`, alias `--proxy-init-code-hash`) for Solady/CreateX. |
-| `nullforge-gpu [N] --createx` | Mine a **CreateX** permissionless CREATE3 salt (deployer + proxy hash are the fixed canonical CreateX constants; the salt is guarded as `keccak256(salt)` in-kernel). Pass the recorded salt straight to `CreateX.deployCreate3(salt, initCode)`. |
-| `nullforge-keygen` | One-time setup: prints the SECRET age identity to **stdout**, writes the PUBLIC recipient to `age-recipient.txt`. |
-| `nullforge-decrypt -i <identity> [file]` | Offline recovery: decrypts the key column of `scanned_keys.txt` (default `file`) with your secret identity. |
+| Command                                                             | What it does                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `nullforge [N] [--reveal]`                                          | CPU miner. `N` = target leading-zero nibbles (default `8`, valid `1–40`).                                                                                                                                                                                                |
+| `nullforge-gpu [N] [--reveal]`                                      | Unified CPU + GPU miner (Apple Metal). Same args.                                                                                                                                                                                                                        |
+| `nullforge-gpu [N] --create2 --deployer 0x.. --init-code-hash 0x..` | Mine a CREATE2 **salt** so a _contract_ deploys to an N-leading-zero address (keccak-only; salt is public → plaintext `scanned_salts.txt`).                                                                                                                              |
+| `nullforge-gpu [N] --create3 --factory 0x.. [--proxy-hash 0x..]`    | Mine a CREATE3 **salt** so a _contract_ deploys to an N-leading-zero, **bytecode-independent** address (same on every chain with that factory). Proxy hash defaults to Solmate/0xSequence; override (`--proxy-hash`, alias `--proxy-init-code-hash`) for Solady/CreateX. |
+| `nullforge-gpu [N] --createx`                                       | Mine a **CreateX** permissionless CREATE3 salt (deployer + proxy hash are the fixed canonical CreateX constants; the salt is guarded as `keccak256(salt)` in-kernel). Pass the recorded salt straight to `CreateX.deployCreate3(salt, initCode)`.                        |
+| `nullforge-keygen`                                                  | One-time setup: prints the SECRET age identity to **stdout**, writes the PUBLIC recipient to `age-recipient.txt`.                                                                                                                                                        |
+| `nullforge-decrypt -i <identity> [file]`                            | Offline recovery: decrypts the key column of `scanned_keys.txt` (default `file`) with your secret identity.                                                                                                                                                              |
 
 **Flags**
 
@@ -239,10 +239,10 @@ CREATE). New bests append to `scanned_salts.txt`, same format as CREATE2.
 
 **Environment variables**
 
-| Variable | Effect |
-|---|---|
-| `NULLFORGE_AGE_RECIPIENT` | `age1…` recipient the miner encrypts to (takes precedence over `age-recipient.txt`). |
-| `NULLFORGE_AGE_IDENTITY_FILE` | Default secret-identity path for `nullforge-decrypt` (instead of `-i`). |
+| Variable                      | Effect                                                                               |
+| ----------------------------- | ------------------------------------------------------------------------------------ |
+| `NULLFORGE_AGE_RECIPIENT`     | `age1…` recipient the miner encrypts to (takes precedence over `age-recipient.txt`). |
+| `NULLFORGE_AGE_IDENTITY_FILE` | Default secret-identity path for `nullforge-decrypt` (instead of `-i`).              |
 
 Each extra leading zero is ~16× more work, so targets above ~10–12 nibbles are
 astronomically infeasible to brute-force — the miner prints a warning and runs
@@ -311,7 +311,7 @@ nullforge-decrypt --identity /Volumes/OFFLINE/age-identity.txt scanned_keys.txt
 The encrypted column is standard age, so `age -d -i <identity> …` interoperates too.
 
 **Escape hatch (insecure):** pass `--reveal` to write/print raw hex keys instead
-(e.g. throwaway local testing). It is the *only* way plaintext keys are emitted,
+(e.g. throwaway local testing). It is the _only_ way plaintext keys are emitted,
 and it prints a warning.
 
 ---
@@ -323,10 +323,10 @@ standard that compresses a long run of leading zeros into a count, surfacing the
 high-entropy suffix so poisoned look-alike addresses are easier to spot. It
 triggers at **n ≥ 4** leading zero nibbles and defines two forms:
 
-| Form | Example | Use |
-|---|---|---|
-| Subscript (Unicode) | `0x0₈abcd…1234` | wallets, explorers, UI |
-| Parenthesis (ASCII) | `0x0(8)abcd…1234` | logs, terminals, bots |
+| Form                | Example           | Use                    |
+| ------------------- | ----------------- | ---------------------- |
+| Subscript (Unicode) | `0x0₈abcd…1234`   | wallets, explorers, UI |
+| Parenthesis (ASCII) | `0x0(8)abcd…1234` | logs, terminals, bots  |
 
 It is purely visual — the underlying address bytes are unchanged. Neither
 subscripts nor parentheses are valid hex, so pasting a notated address into a
@@ -360,7 +360,7 @@ comparing all 20 address bytes, before the result is ever trusted.
 **Approach B (incremental EC, default since `mine_incremental`).** Rather than
 an independent full scalar multiply per candidate key (Approach A, still
 available as `mine`/`dispatch_mine`), each GPU thread does one scalar multiply
-per *batch* and walks the rest of the batch via point additions — about 15x
+per _batch_ and walks the rest of the batch via point additions — about 15x
 fewer field operations per candidate. This is a different, and weaker,
 security model than Approach A's "every key an independent oracle output":
 keys within one batch are affinely related (their difference is public), so
@@ -401,10 +401,10 @@ vectors).
 
 Measured on an Apple M1 Pro (10 CPU cores, 16-core GPU), release build:
 
-| Engine | Throughput |
-|---|---|
-| CPU (all cores) | ~180,000 keys/s |
-| GPU (Metal) | ~25,000,000 keys/s |
+| Engine          | Throughput         |
+| --------------- | ------------------ |
+| CPU (all cores) | ~180,000 keys/s    |
+| GPU (Metal)     | ~25,000,000 keys/s |
 
 The GPU is now the **dominant engine** (~140× the CPU), after two host-side fixes:
 the `mine` compute pipeline is compiled **once** and reused (it was recompiled on

@@ -279,4 +279,34 @@ mod tests {
         let recovered = crate::keyenc::decrypt_key_field(&identity, key_field).unwrap();
         assert_eq!(recovered, privkey.to_vec());
     }
+
+    #[test]
+    fn report_hit_returns_false_and_writes_nothing_when_not_a_new_best() {
+        let (shared, f) = ctx(8);
+        // Seed a best of 5 zeros first.
+        assert!(shared.report_hit(
+            Engine::Cpu,
+            [3u8; 32],
+            "0x00000abc0123456789012345678901234567890a",
+            5
+        ));
+        let after_first = read_file(&f);
+
+        // A hit with fewer zeros than the current best must not become the
+        // best, must not touch the file, and must not trip the stop signal.
+        let became = shared.report_hit(
+            Engine::Gpu,
+            [9u8; 32],
+            "0x0000abc0123456789012345678901234567890ab",
+            4,
+        );
+        assert!(!became);
+        assert_eq!(shared.best_zeros(), 5, "best must be unchanged");
+        assert_eq!(
+            read_file(&f),
+            after_first,
+            "file must be unchanged by a non-qualifying hit"
+        );
+        assert!(!shared.should_stop());
+    }
 }

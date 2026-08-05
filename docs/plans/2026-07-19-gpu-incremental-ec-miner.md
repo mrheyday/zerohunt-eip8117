@@ -22,10 +22,12 @@
 ### Task 1: Extract `scalarmul_jacobian` from `ec.metal` (pure refactor)
 
 **Files:**
+
 - Modify: `kernels/ec.metal:120-145` (the `scalarmul` function)
 - Test: existing `tests/gpu_stages.rs::scalarmul_matches_k256_pubkey` (no new test needed — this step's own verification is that this existing test still passes bit-exact)
 
 **Interfaces:**
+
 - Consumes: `jpoint`, `j_infinity()`, `j_double()`, `j_add()`, `fe_mul()`, `fe_inv()`, `GX`/`GY` constants — all already defined earlier in `kernels/ec.metal`/`kernels/field.metal`.
 - Produces: `inline jpoint g_point()` — the generator `G` as a Jacobian point (`Z=1`). `__attribute__((noinline)) jpoint scalarmul_jacobian(fe k)` — `k*G` left in Jacobian coordinates (no final inversion). Both are consumed by Task 3 and Task 4's new kernels. `scalarmul(fe k, thread fe& outx, thread fe& outy)` keeps its exact existing signature and behavior (affine output), now implemented as a thin wrapper.
 
@@ -132,11 +134,13 @@ git commit -m "refactor(gpu): extract scalarmul_jacobian + g_point from scalarmu
 ### Task 2: `scalar_add_small` — batch-offset scalar arithmetic mod n
 
 **Files:**
+
 - Modify: `kernels/miner.metal` (add after the `SECP_N`/`scalar_in_range` block, i.e. after line 53)
 - Modify: `src/gpu/mod.rs` (add a new method to `impl MetalContext`)
 - Test: `tests/gpu_stages.rs` (new test)
 
 **Interfaces:**
+
 - Consumes: `fe` type, `SECP_N` constant (both already in `kernels/miner.metal`).
 - Produces: `inline bool scalar_ge_n(thread const fe& r)`, `inline fe scalar_add_small(thread const fe& base, uint it)` — consumed by Task 3 and Task 4's kernels. Host: `MetalContext::run_scalar_add_mod_n(&self, bases: &[ethers::types::U256], its: &[u32]) -> Vec<ethers::types::U256>` — test-only entry point, not used by production dispatch.
 
@@ -349,11 +353,13 @@ git commit -m "feat(gpu): scalar_add_small — batch-offset arithmetic mod n"
 ### Task 3: Raw-base incremental-walk test kernel (bit-exact vs k256)
 
 **Files:**
+
 - Modify: `kernels/miner.metal` (add after the `scalar_add_mod_n_test` kernel added in Task 2)
 - Modify: `src/gpu/mod.rs` (add a new method to `impl MetalContext`)
 - Test: `tests/gpu_stages.rs` (new test)
 
 **Interfaces:**
+
 - Consumes: `scalarmul_jacobian`, `g_point`, `j_add`, `fe_is_zero` (Task 1, `ec.metal`), `scalar_add_small` (Task 2), `pubkey_to_address`, `fe_to_bytes_be` (already in `miner.metal`).
 - Produces: host `MetalContext::run_mine_incremental_raw(&self, bases: &[[u8; 32]], iters: u32) -> Vec<Vec<([u8; 32], [u8; 20])>>` — one `Vec` of `(privkey, address)` pairs per input base, length `iters` each. Test-only (lets tests pick exact bases, including the n-wrap case, without needing a keccak preimage). Not used by production dispatch.
 
@@ -601,11 +607,13 @@ git commit -m "feat(gpu): incremental Jacobian walk, verified bit-exact vs k256"
 ### Task 4: Production `mine_incremental` kernel + `dispatch_mine_incremental`
 
 **Files:**
+
 - Modify: `kernels/miner.metal` (add after `mine_incremental_raw_test`)
 - Modify: `src/gpu/mod.rs:307-415` (refactor `dispatch_mine` to share a helper, add `dispatch_mine_incremental`)
 - Test: `tests/gpu_stages.rs` (new test)
 
 **Interfaces:**
+
 - Consumes: same building blocks as Task 3, plus `derive_privkey`, `scalar_in_range`, `leading_zero_nibbles`, `HIT_STRIDE`, `MAX_HITS` (already in `miner.metal`, used by the existing `mine` kernel).
 - Produces: `kernel void mine_incremental(...)` with the **exact same buffer signature** as the existing `mine` kernel (buffers 0-5: seeds, base_counters, iters, threshold, hit_count, hits) so the host dispatch code is identical except for the entry-point name. Host: `MetalContext::dispatch_mine_incremental(&self, seeds: &[[u8; 32]], base_counters: &[u64], iters: u32, threshold: u32) -> Vec<Hit>` — same signature as the existing `dispatch_mine`, consumed by Task 5.
 
@@ -901,10 +909,12 @@ git commit -m "feat(gpu): mine_incremental production kernel + dispatch_mine_inc
 ### Task 5: Wire `gpu_driver::run_batches` to the incremental kernel
 
 **Files:**
+
 - Modify: `src/miner/gpu_driver.rs:56` (the `dispatch_mine` call inside `run_batches`)
 - Test: existing `tests/gpu_stages.rs::gpu_driver_finds_and_reports_low_target` (e2e, no code change needed — verifies the switch didn't break the driver loop)
 
 **Interfaces:**
+
 - Consumes: `MetalContext::dispatch_mine_incremental` (Task 4).
 - Produces: no new public interface — `run_batches`'s signature and behavior contract (dispatch → verify-or-abort → report → throttle) are unchanged; only which kernel it dispatches changes.
 
@@ -963,6 +973,7 @@ git commit -m "feat(gpu): switch run_batches to the incremental-EC kernel"
 ### Task 6: Docs — mark Approach B implemented, update README
 
 **Files:**
+
 - Modify: `docs/specs/2026-07-17-gpu-vanity-miner-design.md:14-16` (the "possible follow-up" note)
 - Modify: `README.MD` (brief mention of the incremental kernel, wherever the README currently describes the GPU miner's approach)
 
@@ -1035,7 +1046,7 @@ comparing all 20 address bytes, before the result is ever trusted.
 **Approach B (incremental EC, default since `mine_incremental`).** Rather than
 an independent full scalar multiply per candidate key (Approach A, still
 available as `mine`/`dispatch_mine`), each GPU thread does one scalar multiply
-per *batch* and walks the rest of the batch via point additions — about 15x
+per _batch_ and walks the rest of the batch via point additions — about 15x
 fewer field operations per candidate. This is a different, and weaker,
 security model than Approach A's "every key an independent oracle output":
 keys within one batch are affinely related (their difference is public), so

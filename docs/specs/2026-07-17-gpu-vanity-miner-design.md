@@ -79,7 +79,7 @@ Each thread loops K iterations per dispatch (amortizes dispatch overhead):
 4. Count leading-zero **nibbles** of the address (matches the CPU tool's metric).
 5. On a hit (`zero_count >= threshold`): atomically claim a slot in the results
    buffer via an atomic counter and write `{ privkey[32], address[20], zero_count,
-   thread_id, counter }`.
+thread_id, counter }`.
 
 Field math correctness (mul, add/sub with carry/borrow, inversion) is the highest-
 risk area and is gated by dedicated test vectors before the EC layer is trusted.

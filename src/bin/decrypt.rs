@@ -20,6 +20,28 @@ fn usage_exit() -> ! {
     std::process::exit(2);
 }
 
+/// Load a secret age identity from a file: the first line starting with
+/// `AGE-SECRET-KEY-1` (case-insensitive, matching the age spec's canonical
+/// uppercase form). The raw file contents are zeroized before returning.
+fn load_identity(path: &str) -> Result<age::x25519::Identity, String> {
+    let mut contents =
+        std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let id_line = contents
+        .lines()
+        .map(str::trim)
+        .find(|l| l.to_uppercase().starts_with("AGE-SECRET-KEY-1"))
+        .map(str::to_string);
+    contents.zeroize();
+
+    let mut id_line = id_line.ok_or_else(|| {
+        format!("no AGE-SECRET-KEY-1... line found in {path}")
+    })?;
+    let identity = age::x25519::Identity::from_str(&id_line)
+        .map_err(|e| format!("invalid age identity in {path}: {e}"));
+    id_line.zeroize();
+    identity
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut identity_path: Option<String> = None;
@@ -46,25 +68,11 @@ fn main() {
         .unwrap_or_else(|| usage_exit());
     let input_path = input_path.unwrap_or_else(|| "scanned_keys.txt".to_string());
 
-    // Load the secret identity: read the file and take the first
-    // AGE-SECRET-KEY-1... line (age identity files may carry `#` comment lines).
-    let mut id_contents = std::fs::read_to_string(&identity_path).unwrap_or_else(|e| {
-        eprintln!("ERROR: cannot read identity file {identity_path}: {e}");
+    // Load the secret identity (first AGE-SECRET-KEY-1... line).
+    let identity = load_identity(&identity_path).unwrap_or_else(|e| {
+        eprintln!("ERROR: {e}");
         std::process::exit(1);
     });
-    let id_line = id_contents
-        .lines()
-        .find(|l| l.trim_start().starts_with("AGE-SECRET-KEY-1"))
-        .map(str::trim)
-        .unwrap_or_else(|| {
-            eprintln!("ERROR: no AGE-SECRET-KEY-1... line found in {identity_path}");
-            std::process::exit(1);
-        });
-    let identity = age::x25519::Identity::from_str(id_line).unwrap_or_else(|e| {
-        eprintln!("ERROR: invalid age identity: {e}");
-        std::process::exit(1);
-    });
-    id_contents.zeroize();
 
     // Decrypt each line's key column (col 4). Lines written under --reveal hold
     // plaintext hex there and will simply fail to decrypt (reported, skipped).
@@ -98,4 +106,70 @@ fn main() {
         }
     }
     eprintln!("decrypted {ok} key(s), {failed} failure(s).");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use age::secrecy::ExposeSecret;
+
+    fn write_identity_file(contents: &str) -> tempfile::NamedTempFile {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), contents).unwrap();
+        f
+    }
+
+    #[test]
+    fn load_identity_reads_a_valid_identity_file() {
+        let identity = age::x25519::Identity::generate();
+        let secret = identity.to_string().expose_secret().to_string();
+        let f = write_identity_file(&secret);
+
+        let loaded = load_identity(f.path().to_str().unwrap()).unwrap();
+        // Same key material -> same derived public recipient.
+        assert_eq!(
+            loaded.to_public().to_string(),
+            identity.to_public().to_string()
+        );
+    }
+
+    #[test]
+    fn load_identity_skips_comment_and_blank_lines() {
+        // Mirrors the `age-keygen` output shape: comment lines (created-at,
+        // public key) precede the actual AGE-SECRET-KEY-1... secret line.
+        let identity = age::x25519::Identity::generate();
+        let secret = identity.to_string().expose_secret().to_string();
+        let contents = format!(
+            "# created: 2026-07-17T00:00:00Z\n# public key: {}\n\n{}\n",
+            identity.to_public(),
+            secret
+        );
+        let f = write_identity_file(&contents);
+
+        let loaded = load_identity(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            loaded.to_public().to_string(),
+            identity.to_public().to_string()
+        );
+    }
+
+    #[test]
+    fn load_identity_errors_when_no_secret_key_line_present() {
+        let f = write_identity_file("# just a comment\nnot a key at all\n");
+        let err = load_identity(f.path().to_str().unwrap()).unwrap_err();
+        assert!(err.contains("no AGE-SECRET-KEY-1"), "got: {err}");
+    }
+
+    #[test]
+    fn load_identity_errors_on_malformed_secret_line() {
+        let f = write_identity_file("AGE-SECRET-KEY-1NOTVALIDBECH32DATA\n");
+        let err = load_identity(f.path().to_str().unwrap()).unwrap_err();
+        assert!(err.contains("invalid age identity"), "got: {err}");
+    }
+
+    #[test]
+    fn load_identity_errors_when_file_is_missing() {
+        let err = load_identity("/nonexistent/path/does-not-exist.txt").unwrap_err();
+        assert!(err.contains("cannot read"), "got: {err}");
+    }
 }

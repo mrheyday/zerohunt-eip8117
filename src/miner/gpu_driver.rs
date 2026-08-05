@@ -17,8 +17,12 @@ pub const ITERS: u32 = 256;
 /// Dispatch-threshold floor: keeps a full ~16.7M-candidate batch under the
 /// kernel's 1024-hit buffer cap (16.7M / 16^4 ≈ 256 << 1024).
 pub const GPU_FLOOR: usize = 4;
-/// GPU duty-cycle target (fraction of wall-clock spent computing).
-const UTILIZATION: f64 = 0.80;
+/// GPU duty-cycle target as an exact integer ratio DUTY_NUM/DUTY_DEN of
+/// wall-clock spent computing (no float — matches the engine integer-only
+/// invariant). Operator override: 16/16 = FULL utilization (idle collapses to
+/// zero, GPU never sleeps between batches); was 4/5 (0.80).
+const DUTY_NUM: u32 = 16;
+const DUTY_DEN: u32 = 16;
 
 /// Threshold for the next batch: at least `GPU_FLOOR`, rising with the current
 /// best so higher-zero targets don't flood the buffer. If `target` is below the
@@ -45,7 +49,8 @@ pub fn verify_hit_or_err(ctx: &MetalContext, hit: &Hit) -> Result<usize, String>
 
 /// Dispatch mine batches until `shared.should_stop()`. Verifies every hit; on a
 /// verified hit that strictly beats the best, reports it through the funnel.
-/// Sleeps after each batch to hold the GPU at ~`UTILIZATION` duty cycle.
+/// Holds the GPU at the `DUTY_NUM`/`DUTY_DEN` duty cycle by sleeping
+/// `(DEN-NUM)/NUM` of each batch's compute time (zero at full 16/16).
 pub fn run_batches(ctx: &MetalContext, shared: Arc<MinerShared>, seeds: &[[u8; 32]]) {
     let n = seeds.len();
     let mut base: u64 = 0;
@@ -76,8 +81,10 @@ pub fn run_batches(ctx: &MetalContext, shared: Arc<MinerShared>, seeds: &[[u8; 3
             }
         }
 
-        // Hold ~UTILIZATION duty cycle: idle (1-U)/U of the compute time.
-        let idle = batch_time.mul_f64((1.0 - UTILIZATION) / UTILIZATION);
+        // Hold the DUTY_NUM/DUTY_DEN duty cycle with integer Duration math:
+        // idle = compute * (DEN - NUM) / NUM. `Duration * u32` and `/ u32` are
+        // integer ops (multiply before divide to keep precision) — no float.
+        let idle = batch_time * (DUTY_DEN - DUTY_NUM) / DUTY_NUM;
         std::thread::sleep(idle);
     }
 }
@@ -97,5 +104,13 @@ mod tests {
     fn threshold_clamps_to_target_when_target_below_floor() {
         // e.g. `nullforge-gpu 2`: we must still surface >=2 hits
         assert_eq!(gpu_threshold(0, 2), 2);
+    }
+
+    #[test]
+    fn threshold_at_target_exactly_equal_to_floor_stays_at_floor() {
+        // Boundary: `target < GPU_FLOOR` clamps down, but `target == GPU_FLOOR`
+        // must NOT clamp (the `<` comparison is strict) -- the floor itself is
+        // still a valid, un-clamped threshold.
+        assert_eq!(gpu_threshold(0, GPU_FLOOR), GPU_FLOOR as u32);
     }
 }
